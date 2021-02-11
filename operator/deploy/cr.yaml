@@ -4,9 +4,9 @@ metadata:
   name: "vault"
 spec:
   size: 1
-  image: vault:1.5.0
+  image: vault:1.6.2
   # specify a custom bank-vaults image with bankVaultsImage:
-  # bankVaultsImage: banzaicloud/bank-vaults:latest
+  # bankVaultsImage: ghcr.io/banzaicloud/bank-vaults:latest
 
   # Common annotations for all created resources
   annotations:
@@ -28,14 +28,15 @@ spec:
   vaultConfigurerLabels:
     example.com/log-format: "string"
 
-  # Support for nodeAffinity Rules
-  # nodeAffinity:
-  #   requiredDuringSchedulingIgnoredDuringExecution:
-  #     nodeSelectorTerms:
-  #     - matchExpressions:
-  #       - key : "node-role.kubernetes.io/your_role"
-  #         operator: In
-  #         values: ["true"]
+  # Support for affinity Rules, same as in PodSpec
+  # affinity:
+  #   nodeAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       nodeSelectorTerms:
+  #       - matchExpressions:
+  #         - key : "node-role.kubernetes.io/your_role"
+  #           operator: In
+  #           values: ["true"]
 
   # Support for pod nodeSelector rules to control which nodes can be chosen to run
   # the given pods
@@ -70,7 +71,7 @@ spec:
     # Specify Ingress object annotations here, if TLS is enabled (which is by default)
     # the operator will add NGINX, Traefik and HAProxy Ingress compatible annotations
     # to support TLS backends
-    annotations:
+    annotations: {}
     # Override the default Ingress specification here
     # This follows the same format as the standard Kubernetes Ingress
     # See: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.13/#ingressspec-v1beta1-extensions
@@ -205,6 +206,14 @@ spec:
   #   - ip: "127.0.0.1"
   #     hostnames:
   #     - "vault.local"
+
+  # It is possible to override the Vault container directly:
+  # vaultContainerSpec:
+  #   lifecycle:
+  #     postStart:
+  #       exec:
+  #         command:
+  #              - setcap cap_ipc_lock=+ep /vault/plugins/orchestrate
 
   # Marks presence of Istio, which influences things like port namings
   istioEnabled: false

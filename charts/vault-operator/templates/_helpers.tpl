@@ -32,18 +32,6 @@ Create chart name and version as used by the chart label.
 {{- end -}}
 
 {{/*
-Determines if the current executing Helm environment is v3 or not.
-If yes, it returns the string "helm3", otherwise it returns "".
-*/}}
-{{- define "isHelm3" -}}
-{{- if hasKey (toJson .Chart | fromJson) "type" -}}
-{{- "helm3" -}}
-{{- else -}}
-{{- "" -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
 Overrideable version for container image tags.
 */}}
 {{- define "vault-operator.bank-vaults.version" -}}
@@ -73,3 +61,14 @@ imagePullSecrets:
     {{- end }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "vault-operator.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "vault-operator.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}

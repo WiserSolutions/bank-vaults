@@ -5,8 +5,8 @@
 replicaCount: 1
 
 image:
-  bankVaultsRepository: banzaicloud/bank-vaults
-  repository: banzaicloud/vault-operator
+  bankVaultsRepository: ghcr.io/banzaicloud/bank-vaults
+  repository: ghcr.io/banzaicloud/vault-operator
   # tag: ""
   pullPolicy: IfNotPresent
   imagePullSecrets: []  # global.imagePullSecrets is also supported
@@ -75,3 +75,12 @@ etcd-operator:
 psp:
   enabled: false
   vaultSA: "vault"
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""

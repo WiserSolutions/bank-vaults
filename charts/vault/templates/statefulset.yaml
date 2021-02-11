@@ -3,7 +3,7 @@ kind: StatefulSet
 metadata:
   name: {{ template "vault.fullname" . }}
   labels:
-    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    helm.sh/chart: {{ template "vault.chart" . }}
     app.kubernetes.io/name: {{ template "vault.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -116,13 +116,15 @@ spec:
             {{ else }}
             scheme: HTTPS
             {{ end }}
-            path: /v1/sys/health?standbyok=true&perfstandbyok=true
+            path: /v1/sys/health?standbyok=true&perfstandbyok=true&drsecondarycode=299
             port: vault
         securityContext:
           readOnlyRootFilesystem: true
+          {{ if not .Values.vault.config.disable_mlock }}
           capabilities:
             add:
             - IPC_LOCK
+          {{ end }}
         volumeMounts:
         - name: vault-config
           mountPath: /vault/config/
@@ -254,7 +256,7 @@ spec:
                   app.kubernetes.io/name: {{ template "vault.fullname" . }}
                   app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end }}
-      serviceAccountName: {{ template "vault.fullname" . }}
+      serviceAccountName: {{ template "vault.serviceAccountName" . }}
       securityContext:
         fsGroup: 65534
       volumes:

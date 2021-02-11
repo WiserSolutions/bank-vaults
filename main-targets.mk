@@ -26,7 +26,7 @@ debug: build ## Builds binary package
 
 .PHONY: debug-docker
 debug-docker: debug ## Builds binary package
-	docker build -t banzaicloud/${BINARY_NAME}:debug -f Dockerfile.dev .
+	docker build -t ghcr.io/banzaicloud/${BINARY_NAME}:debug -f Dockerfile.dev .
 
 bin/golangci-lint: bin/golangci-lint-${GOLANGCI_VERSION}
 	@ln -sf golangci-lint-${GOLANGCI_VERSION} bin/golangci-lint
@@ -129,7 +129,25 @@ help:
 var-%: ; @echo $($*)
 varexport-%: ; @echo $*=$($*)
 
-# Regenerate clientset, deepcopy funcs, listers and informers
+
 .PHONY: generate-code
-generate-code:
+generate-code: ## Regenerate clientset, deepcopy funcs, listers and informers
 	./hack/update-codegen.sh v${CODE_GENERATOR_VERSION}
+
+bin/controller-gen-${CONTROLLER_GEN_VERSION}:
+	set -ex ;\
+	CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
+	cd $$CONTROLLER_GEN_TMP_DIR ;\
+	go mod init tmp ;\
+	GOBIN=$(PWD)/bin/controller-gen-${CONTROLLER_GEN_VERSION} go get sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION} ;\
+	rm -rf $$CONTROLLER_GEN_TMP_DIR
+
+bin/controller-gen: bin/controller-gen-${CONTROLLER_GEN_VERSION}
+	ln -sf controller-gen-${CONTROLLER_GEN_VERSION}/controller-gen bin/controller-gen
+
+.PHONY: generate-crds
+generate-crds: bin/controller-gen ## Regenerate CRDs in the Helm chart and examples
+	bin/controller-gen crd:maxDescLen=0,preserveUnknownFields=false paths=./operator/... output:crd:artifacts:config=./operator/deploy/
+	cp operator/deploy/vault.banzaicloud.com_vaults.yaml charts/vault-operator/crds/crd.yaml
+	cp operator/deploy/vault.banzaicloud.com_vaults.yaml operator/deploy/crd.yaml
+	rm operator/deploy/vault.banzaicloud.com_vaults.yaml

@@ -5,7 +5,7 @@ OS = $(shell uname)
 # Project variables
 PACKAGE = github.com/banzaicloud/bank-vaults
 BINARY_NAME ?= bank-vaults
-DOCKER_REGISTRY ?= banzaicloud
+DOCKER_REGISTRY ?= ghcr.io/banzaicloud
 DOCKER_IMAGE = ${DOCKER_REGISTRY}/bank-vaults
 WEBHOOK_DOCKER_IMAGE = ${DOCKER_REGISTRY}/vault-secrets-webhook
 OPERATOR_DOCKER_IMAGE = ${DOCKER_REGISTRY}/vault-operator
@@ -30,8 +30,9 @@ DOCKER_TAG ?= ${VERSION}
 # Dependency versions
 GOTESTSUM_VERSION = 0.4.0
 GOLANGCI_VERSION = 1.27.0
-LICENSEI_VERSION = 0.2.0
-CODE_GENERATOR_VERSION = 0.18.6
+LICENSEI_VERSION = 0.3.1
+CODE_GENERATOR_VERSION = 0.19.3
+CONTROLLER_GEN_VERSION = v0.4.1
 
 GOLANG_VERSION = 1.15
 
@@ -129,7 +130,7 @@ major: ## Release a new major version
 
 .PHONY: operator-up
 operator-up:
-	kubectl apply -f operator/deploy/crd.yaml
+	kubectl replace -f operator/deploy/crd.yaml || kubectl create -f operator/deploy/crd.yaml
 	kubectl apply -f operator/deploy/rbac.yaml
 	OPERATOR_NAME=vault-dev go run operator/cmd/manager/main.go -verbose
 

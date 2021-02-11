@@ -6,7 +6,7 @@ strategy:
   type: RollingUpdate
 image:
   repository: vault
-  tag: 1.5.0
+  tag: 1.6.2
   pullPolicy: IfNotPresent
 
 service:
@@ -62,9 +62,6 @@ podAnnotations:
 
 labels: {}
   #  team: banzai
-
-serviceAccount:
-  annotations: {}
 
 resources:
   requests:
@@ -169,6 +166,9 @@ vault:
 
     ui: true
 
+    # Uncomment this tot remove the need for the IPC_LOCK capability
+    # disable_mlock: true
+
     # See https://www.vaultproject.io/docs/configuration/storage/ for storage backends
     storage:
       {}
@@ -206,7 +206,7 @@ vault:
 
 unsealer:
   image:
-    repository: banzaicloud/bank-vaults
+    repository: ghcr.io/banzaicloud/bank-vaults
     # tag: ""
     pullPolicy: IfNotPresent
   args:
@@ -252,9 +252,17 @@ statsd:
           path: "$2"
 
 rbac:
-  enabled: true
   psp:
     enabled: false
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
 
 vaultConfig:
   resources: {}

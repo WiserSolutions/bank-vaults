@@ -25,13 +25,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeVer "k8s.io/apimachinery/pkg/version"
-
-	"github.com/spf13/viper"
 )
 
 const vaultAgentConfig = `
 pid_file = "/tmp/pidfile"
-exit_after_auth = true
 
 auto_auth {
 	method "kubernetes" {
@@ -48,10 +45,10 @@ auto_auth {
 	}
 }`
 
-func (mw *mutatingWebhook) mutatePod(pod *corev1.Pod, vaultConfig VaultConfig, ns string, dryRun bool) error {
+func (mw *mutatingWebhook) mutatePod(ctx context.Context, pod *corev1.Pod, vaultConfig VaultConfig, ns string, dryRun bool) error {
 	mw.logger.Debug("Successfully connected to the API")
 
-	initContainersMutated, err := mw.mutateContainers(pod.Spec.InitContainers, &pod.Spec, vaultConfig, ns)
+	initContainersMutated, err := mw.mutateContainers(ctx, pod.Spec.InitContainers, &pod.Spec, vaultConfig, ns)
 	if err != nil {
 		return err
 	}
@@ -62,7 +59,7 @@ func (mw *mutatingWebhook) mutatePod(pod *corev1.Pod, vaultConfig VaultConfig, n
 		mw.logger.Debug("No pod init containers were mutated")
 	}
 
-	containersMutated, err := mw.mutateContainers(pod.Spec.Containers, &pod.Spec, vaultConfig, ns)
+	containersMutated, err := mw.mutateContainers(ctx, pod.Spec.Containers, &pod.Spec, vaultConfig, ns)
 	if err != nil {
 		return err
 	}
@@ -111,19 +108,22 @@ func (mw *mutatingWebhook) mutatePod(pod *corev1.Pod, vaultConfig VaultConfig, n
 		var agentConfigMapName string
 
 		if vaultConfig.UseAgent || vaultConfig.CtConfigMap != "" {
-			configMap := getConfigMapForVaultAgent(pod, vaultConfig)
-			agentConfigMapName = configMap.Name
-
-			if !dryRun {
-				_, err := mw.k8sClient.CoreV1().ConfigMaps(ns).Create(context.Background(), configMap, metav1.CreateOptions{})
-				if err != nil {
-					if errors.IsAlreadyExists(err) {
-						_, err = mw.k8sClient.CoreV1().ConfigMaps(ns).Update(context.Background(), configMap, metav1.UpdateOptions{})
-						if err != nil {
+			if vaultConfig.AgentConfigMap != "" {
+				agentConfigMapName = vaultConfig.AgentConfigMap
+			} else {
+				configMap := getConfigMapForVaultAgent(pod, vaultConfig)
+				agentConfigMapName = configMap.Name
+				if !dryRun {
+					_, err := mw.k8sClient.CoreV1().ConfigMaps(ns).Create(context.Background(), configMap, metav1.CreateOptions{})
+					if err != nil {
+						if errors.IsAlreadyExists(err) {
+							_, err = mw.k8sClient.CoreV1().ConfigMaps(ns).Update(context.Background(), configMap, metav1.UpdateOptions{})
+							if err != nil {
+								return err
+							}
+						} else {
 							return err
 						}
-					} else {
-						return err
 					}
 				}
 			}
@@ -164,7 +164,7 @@ func (mw *mutatingWebhook) mutatePod(pod *corev1.Pod, vaultConfig VaultConfig, n
 		mw.logger.Debug("Successfully appended pod containers to spec")
 	}
 
-	if vaultConfig.AgentConfigMap != "" {
+	if vaultConfig.AgentConfigMap != "" && !vaultConfig.UseAgent {
 		mw.logger.Debug("Vault Agent config found")
 
 		mw.addAgentSecretsVolToContainers(vaultConfig, pod.Spec.Containers)
@@ -195,7 +195,7 @@ func (mw *mutatingWebhook) mutatePod(pod *corev1.Pod, vaultConfig VaultConfig, n
 	return nil
 }
 
-func (mw *mutatingWebhook) mutateContainers(containers []corev1.Container, podSpec *corev1.PodSpec, vaultConfig VaultConfig, ns string) (bool, error) {
+func (mw *mutatingWebhook) mutateContainers(ctx context.Context, containers []corev1.Container, podSpec *corev1.PodSpec, vaultConfig VaultConfig, ns string) (bool, error) {
 	mutated := false
 
 	for i, container := range containers {
@@ -212,6 +212,9 @@ func (mw *mutatingWebhook) mutateContainers(containers []corev1.Container, podSp
 			if hasVaultPrefix(env.Value) {
 				envVars = append(envVars, env)
 			}
+			if hasInlineVaultDelimiters(env.Value) {
+				envVars = append(envVars, env)
+			}
 			if env.ValueFrom != nil {
 				valueFrom, err := mw.lookForValueFrom(env, ns)
 				if err != nil {
@@ -224,7 +227,7 @@ func (mw *mutatingWebhook) mutateContainers(containers []corev1.Container, podSp
 			}
 		}
 
-		if len(envVars) == 0 {
+		if len(envVars) == 0 && vaultConfig.VaultEnvFromPath == "" {
 			continue
 		}
 
@@ -234,7 +237,7 @@ func (mw *mutatingWebhook) mutateContainers(containers []corev1.Container, podSp
 
 		// the container has no explicitly specified command
 		if len(args) == 0 {
-			imageConfig, err := mw.registry.GetImageConfig(mw.k8sClient, ns, &container, podSpec) // nolint:gosec
+			imageConfig, err := mw.registry.GetImageConfig(ctx, mw.k8sClient, ns, &container, podSpec) // nolint:gosec
 			if err != nil {
 				return false, err
 			}
@@ -268,6 +271,10 @@ func (mw *mutatingWebhook) mutateContainers(containers []corev1.Container, podSp
 			{
 				Name:  "VAULT_SKIP_VERIFY",
 				Value: strconv.FormatBool(vaultConfig.SkipVerify),
+			},
+			{
+				Name:  "VAULT_AUTH_METHOD",
+				Value: vaultConfig.AuthMethod,
 			},
 			{
 				Name:  "VAULT_PATH",
@@ -340,7 +347,7 @@ func (mw *mutatingWebhook) mutateContainers(containers []corev1.Container, podSp
 			})
 		}
 
-		if vaultConfig.UseAgent {
+		if vaultConfig.UseAgent || vaultConfig.TokenAuthMount != "" {
 			container.Env = append(container.Env, corev1.EnvVar{
 				Name:  "VAULT_TOKEN_FILE",
 				Value: "/vault/.vault-token",
@@ -550,7 +557,37 @@ mountSearch:
 func getInitContainers(originalContainers []corev1.Container, podSecurityContext *corev1.PodSecurityContext, vaultConfig VaultConfig, initContainersMutated bool, containersMutated bool, containerEnvVars []corev1.EnvVar, containerVolMounts []corev1.VolumeMount) []corev1.Container {
 	var containers = []corev1.Container{}
 
-	if vaultConfig.UseAgent || vaultConfig.CtConfigMap != "" {
+	if vaultConfig.TokenAuthMount != "" {
+		// vault.security.banzaicloud.io/token-auth-mount: "token:vault-token"
+		split := strings.Split(vaultConfig.TokenAuthMount, ":")
+		mountName := split[0]
+		tokenName := split[1]
+		fileLoc := "/token/" + tokenName
+		cmd := fmt.Sprintf("cp %s /vault/.vault-token", fileLoc)
+
+		containers = append(containers, corev1.Container{
+			Name:            "copy-vault-token",
+			Image:           vaultConfig.AgentImage,
+			ImagePullPolicy: vaultConfig.AgentImagePullPolicy,
+			Command:         []string{"sh", "-c", cmd},
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("50m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "vault-env",
+					MountPath: "/vault/",
+				},
+				{
+					Name:      mountName,
+					MountPath: "/token",
+				},
+			},
+		})
+	} else if vaultConfig.UseAgent || vaultConfig.CtConfigMap != "" {
 		serviceAccountMount := getServiceAccountMount(originalContainers)
 
 		containerVolMounts = append(containerVolMounts, serviceAccountMount, corev1.VolumeMount{
@@ -569,11 +606,15 @@ func getInitContainers(originalContainers []corev1.Container, podSecurityContext
 			Image:           vaultConfig.AgentImage,
 			ImagePullPolicy: vaultConfig.AgentImagePullPolicy,
 			SecurityContext: securityContext,
-			Command:         []string{"vault", "agent", "-config=/vault/agent/config.hcl"},
+			Command:         []string{"vault", "agent", "-config=/vault/agent/config.hcl", "-exit-after-auth"},
 			Env:             containerEnvVars,
 			VolumeMounts:    containerVolMounts,
 			Resources: corev1.ResourceRequirements{
 				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("250m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+				Requests: corev1.ResourceList{
 					corev1.ResourceCPU:    resource.MustParse("50m"),
 					corev1.ResourceMemory: resource.MustParse("64Mi"),
 				},
@@ -584,8 +625,8 @@ func getInitContainers(originalContainers []corev1.Container, podSecurityContext
 	if initContainersMutated || containersMutated {
 		containers = append(containers, corev1.Container{
 			Name:            "copy-vault-env",
-			Image:           viper.GetString("vault_env_image"),
-			ImagePullPolicy: corev1.PullPolicy(viper.GetString("vault_env_image_pull_policy")),
+			Image:           vaultConfig.EnvImage,
+			ImagePullPolicy: vaultConfig.EnvImagePullPolicy,
 			Command:         []string{"sh", "-c", "cp /usr/local/bin/vault-env /vault/"},
 			VolumeMounts: []corev1.VolumeMount{
 				{
@@ -597,6 +638,10 @@ func getInitContainers(originalContainers []corev1.Container, podSecurityContext
 			SecurityContext: getSecurityContext(podSecurityContext, vaultConfig),
 			Resources: corev1.ResourceRequirements{
 				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("250m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+				Requests: corev1.ResourceList{
 					corev1.ResourceCPU:    resource.MustParse("50m"),
 					corev1.ResourceMemory: resource.MustParse("64Mi"),
 				},
@@ -702,7 +747,7 @@ func getAgentContainers(originalContainers []corev1.Container, vaultConfig Vault
 
 	var agentCommandString []string
 	if vaultConfig.AgentOnce {
-		agentCommandString = []string{"agent", "-config", "/vault/config/config.hcl", "-once"}
+		agentCommandString = []string{"agent", "-config", "/vault/config/config.hcl", "-exit-after-auth"}
 	} else {
 		agentCommandString = []string{"agent", "-config", "/vault/config/config.hcl"}
 	}

@@ -13,6 +13,7 @@ function finish {
     echo "The last command was: $(history 1 | awk '{print $2}')"
     kubectl get pods
     kubectl describe pods
+    kubectl describe services
     kubectl logs deployment/vault-operator
     kubectl logs --all-containers statefulset/vault
     kubectl logs -n vswh deployment/vault-secrets-webhook
@@ -80,7 +81,7 @@ kubectl delete secret vault-unseal-keys
 
 # Third test: Raft HA setup
 kubectl apply -f operator/deploy/cr-raft.yaml
-kubectl wait --for=condition=healthy --timeout=120s vault/vault
+kubectl wait --for=condition=healthy --timeout=150s vault/vault
 kubectl delete -f operator/deploy/cr-raft.yaml
 kubectl delete secret vault-unseal-keys
 kubectl delete pvc --all
@@ -109,23 +110,20 @@ sleep 20
 kurun run cmd/examples/main.go
 
 # Only kind is configured to be able to run this test
-if [ "${GITHUB_ACTIONS}" == "true" ]
-then
-    kubectl delete -f operator/deploy/cr-priority.yaml
-    kubectl delete -f operator/deploy/priorityclass.yaml
-    kubectl delete secret vault-unseal-keys
-    kubectl delete pvc --all
+kubectl delete -f operator/deploy/cr-priority.yaml
+kubectl delete -f operator/deploy/priorityclass.yaml
+kubectl delete secret vault-unseal-keys
+kubectl delete pvc --all
 
-    # Sixth test: Run the OIDC authenticated client test
-    kubectl apply -f operator/deploy/cr-oidc.yaml
-    kubectl wait --for=condition=healthy --timeout=120s vault/vault
+# Sixth test: Run the OIDC authenticated client test
+kubectl create namespace vswh # create the namespace beforehand, because we need the CA cert here as well
+kubectl apply -f operator/deploy/cr-oidc.yaml
+kubectl wait --for=condition=healthy --timeout=120s vault/vault
 
-    kurun apply -f hack/oidc-pod.yaml
-    waitfor "kubectl get pod/oidc -o json | jq -e '.status.phase == \"Succeeded\"'"
-fi
+kurun apply -f hack/oidc-pod.yaml
+waitfor "kubectl get pod/oidc -o json | jq -e '.status.phase == \"Succeeded\"'"
 
 # Run the webhook test, the hello-secrets deployment should be successfully mutated
-kubectl create namespace vswh
 helm upgrade --install vault-secrets-webhook ./charts/vault-secrets-webhook \
     --set image.tag=latest \
     --set image.pullPolicy=IfNotPresent \
@@ -133,18 +131,20 @@ helm upgrade --install vault-secrets-webhook ./charts/vault-secrets-webhook \
     --set configmapFailurePolicy=Fail \
     --set podsFailurePolicy=Fail \
     --set secretsFailurePolicy=Fail \
-    --set env.VAULT_ENV_IMAGE=banzaicloud/vault-env:latest \
+    --set env.VAULT_ENV_IMAGE=ghcr.io/banzaicloud/vault-env:latest \
     --namespace vswh \
     --wait
 
 kubectl apply -f deploy/test-secret.yaml
-test `kubectl get secrets sample-secret -o jsonpath='{.data.\.dockerconfigjson}' | base64 --decode | jq -r '.auths[].username'` = "dockerrepouser"
-test `kubectl get secrets sample-secret -o jsonpath='{.data.\.dockerconfigjson}' | base64 --decode | jq -r '.auths[].password'` = "dockerrepopassword"
+test "$(kubectl get secrets sample-secret -o jsonpath='{.data.\.dockerconfigjson}' | base64 --decode | jq -r '.auths[].username')" = "dockerrepouser"
+test "$(kubectl get secrets sample-secret -o jsonpath='{.data.\.dockerconfigjson}' | base64 --decode | jq -r '.auths[].password')" = "dockerrepopassword"
+test "$(kubectl get secrets sample-secret -o jsonpath='{.data.inline}' | base64 --decode)" = "Inline: secretId AWS_ACCESS_KEY_ID"
 
 kubectl apply -f deploy/test-configmap.yaml
-test `kubectl get cm sample-configmap -o jsonpath='{.data.aws-access-key-id}'` = "secretId"
+test "$(kubectl get cm sample-configmap -o jsonpath='{.data.aws-access-key-id}')" = "secretId"
 test "$(kubectl get cm sample-configmap -o jsonpath='{.data.aws-access-key-id-formatted}')" = "AWS key in base64: c2VjcmV0SWQ="
-test `kubectl get cm sample-configmap -o jsonpath='{.binaryData.aws-access-key-id-binary}'` = "secretId"
+test "$(kubectl get cm sample-configmap -o jsonpath='{.binaryData.aws-access-key-id-binary}')" = "secretId"
+test "$(kubectl get cm sample-configmap -o jsonpath='{.data.aws-access-key-id-inline}')" = "AWS_ACCESS_KEY_ID: secretId AWS_SECRET_ACCESS_KEY: s3cr3t"
 
 kubectl apply -f deploy/test-deployment-seccontext.yaml
 kubectl wait --for=condition=available deployment/hello-secrets-seccontext --timeout=120s

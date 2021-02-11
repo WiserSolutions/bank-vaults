@@ -7,8 +7,8 @@ metadata:
     vault_cr: vault
 spec:
   size: 3
-  image: vault:1.5.0
-  
+  image: vault:1.6.2
+
   # Common annotations for all created resources
   annotations:
     common/annotation: "true"
@@ -29,14 +29,15 @@ spec:
   vaultConfigurerLabels:
     example.com/log-format: "string"
 
-  # Support for nodeAffinity Rules
-  # nodeAffinity:
-  #   requiredDuringSchedulingIgnoredDuringExecution:
-  #     nodeSelectorTerms:
-  #     - matchExpressions:
-  #       - key : "node-role.kubernetes.io/your_role"
-  #         operator: In
-  #         values: ["true"]
+  # Support for affinity Rules
+  # affinity:
+  #   nodeAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       nodeSelectorTerms:
+  #       - matchExpressions:
+  #         - key : "node-role.kubernetes.io/your_role"
+  #           operator: In
+  #           values: ["true"]
 
   # Support for pod nodeSelector rules to control which nodes can be chosen to run
   # the given pods
@@ -64,7 +65,7 @@ spec:
     # Specify Ingress object annotations here, if TLS is enabled (which is by default)
     # the operator will add NGINX, Traefik and HAProxy Ingress compatible annotations
     # to support TLS backends
-    annotations:
+    annotations: {}
     # Override the default Ingress specification here
     # This follows the same format as the standard Kubernetes Ingress
     # See: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.13/#ingressspec-v1beta1-extensions
@@ -134,8 +135,10 @@ spec:
     api_addr: https://vault.default:8200
     cluster_addr: "https://${.Env.POD_NAME}:8201"
     ui: true
-  
+
   statsdDisabled: true
+
+  serviceRegistrationEnabled: true
 
   resources:
     # A YAML representation of resource ResourceRequirements for vault container

@@ -7,12 +7,15 @@
 {{- $cn := printf "%s.%s.svc" $svcName .Release.Namespace }}
 {{- $altName1 := printf "%s.cluster.local" $cn }}
 {{- $altName2 := printf "%s" $cn }}
-{{- $server := genSignedCert $cn nil (list $altName1 $altName2) 365 $ca }}
+{{- $server := genSignedCert $cn nil (concat (list $altName1 $altName2) .Values.certificate.extraAltNames) 365 $ca }}
 {{- $tlsCrt = b64enc $server.Cert }}
 {{- $tlsKey = b64enc $server.Key }}
 {{- $caCrt =  b64enc $ca.Cert }}
 {{- else if .Values.certificate.useCertManager }}
-{{/* do nothing with certs here. Cert-manager will handle it all */}}
+{{/* Create a new Certificate with cert-manager. */}}
+{{/* all clientConfig.caBundle will be overridden by cert-manager */}}
+{{- else if .Values.certificate.servingCertificate }}
+{{/* Use an already externally defined Certificate by cert-manager. */}}
 {{/* all clientConfig.caBundle will be overridden by cert-manager */}}
 {{- else }}
 {{- $tlsCrt = required "Required when certificate.generate is false" .Values.certificate.server.tls.crt }}
@@ -20,7 +23,7 @@
 {{- $caCrt = required "Required when certificate.generate is false" .Values.certificate.ca.crt }}
 {{- end }}
 
-{{- if (eq .Values.certificate.useCertManager false) }}
+{{- if $tlsCrt }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -44,15 +47,27 @@ metadata:
 {{- if .Values.certificate.useCertManager }}
   annotations:
     cert-manager.io/inject-ca-from: "{{ .Release.Namespace }}/{{ include "vault-secrets-webhook.servingCertificate" . }}"
+{{- else if .Values.certificate.servingCertificate }}
+  annotations:
+    cert-manager.io/inject-ca-from: "{{ .Release.Namespace }}/{{ .Values.certificate.servingCertificate }}"
 {{- end }}
 webhooks:
 - name: pods.{{ template "vault-secrets-webhook.name" . }}.admission.banzaicloud.com
+  {{- if semverCompare ">=1.14-0" .Capabilities.KubeVersion.GitVersion }}
   admissionReviewVersions: ["v1beta1"]
+  {{- if .Values.timeoutSeconds }}
+  timeoutSeconds: {{ .Values.timeoutSeconds }}
+  {{- end }}
+  {{- end }}
   clientConfig:
+    {{- if .Values.webhookClientConfig.useUrl }}
+    url: {{ .Values.webhookClientConfig.url }}
+    {{- else }}
     service:
       namespace: {{ .Release.Namespace }}
       name: {{ template "vault-secrets-webhook.fullname" . }}
       path: /pods
+    {{- end }}
     caBundle: {{ $caCrt }}
   rules:
   - operations:
@@ -92,12 +107,21 @@ webhooks:
   sideEffects: {{ .Values.apiSideEffectValue }}
 {{- end }}
 - name: secrets.{{ template "vault-secrets-webhook.name" . }}.admission.banzaicloud.com
+  {{- if semverCompare ">=1.14-0" .Capabilities.KubeVersion.GitVersion }}
   admissionReviewVersions: ["v1beta1"]
+  {{- if .Values.timeoutSeconds }}
+  timeoutSeconds: {{ .Values.timeoutSeconds }}
+  {{- end }}
+  {{- end }}
   clientConfig:
+    {{- if .Values.webhookClientConfig.useUrl }}
+    url: {{ .Values.webhookClientConfig.url }}
+    {{- else }}
     service:
       namespace: {{ .Release.Namespace }}
       name: {{ template "vault-secrets-webhook.fullname" . }}
       path: /secrets
+    {{- end }}
     caBundle: {{ $caCrt }}
   rules:
   - operations:
@@ -128,12 +152,21 @@ webhooks:
 {{- end }}
 {{- if .Values.configMapMutation }}
 - name: configmaps.{{ template "vault-secrets-webhook.name" . }}.admission.banzaicloud.com
+  {{- if semverCompare ">=1.14-0" .Capabilities.KubeVersion.GitVersion }}
   admissionReviewVersions: ["v1beta1"]
+  {{- if .Values.timeoutSeconds }}
+  timeoutSeconds: {{ .Values.timeoutSeconds }}
+  {{- end }}
+  {{- end }}
   clientConfig:
+    {{- if .Values.webhookClientConfig.useUrl }}
+    url: {{ .Values.webhookClientConfig.url }}
+    {{- else }}
     service:
       namespace: {{ .Release.Namespace }}
       name: {{ template "vault-secrets-webhook.fullname" . }}
       path: /configmaps
+    {{- end }}
     caBundle: {{ $caCrt }}
   rules:
     - operations:
@@ -165,12 +198,21 @@ webhooks:
 {{- end }}
 {{- if .Values.customResourceMutations }}
 - name: objects.{{ template "vault-secrets-webhook.name" . }}.admission.banzaicloud.com
+  {{- if semverCompare ">=1.14-0" .Capabilities.KubeVersion.GitVersion }}
   admissionReviewVersions: ["v1beta1"]
+  {{- if .Values.timeoutSeconds }}
+  timeoutSeconds: {{ .Values.timeoutSeconds }}
+  {{- end }}
+  {{- end }}
   clientConfig:
+    {{- if .Values.webhookClientConfig.useUrl }}
+    url: {{ .Values.webhookClientConfig.url }}
+    {{- else }}
     service:
       namespace: {{ .Release.Namespace }}
       name: {{ template "vault-secrets-webhook.fullname" . }}
       path: /objects
+    {{- end }}
     caBundle: {{ $caCrt }}
   rules:
   - operations:

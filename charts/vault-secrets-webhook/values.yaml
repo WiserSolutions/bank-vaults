@@ -8,6 +8,7 @@ debug: false
 
 certificate:
   useCertManager: false
+  servingCertificate: null
   generate: true
   server:
     tls:
@@ -15,8 +16,11 @@ certificate:
       key:
   ca:
     crt:
+  extraAltNames: []
+  # use extra names if you want use the webhook via an ingress or a loadbalancer
+
 image:
-  repository: banzaicloud/vault-secrets-webhook
+  repository: ghcr.io/banzaicloud/vault-secrets-webhook
   # tag: ""
   pullPolicy: IfNotPresent
   imagePullSecrets: []
@@ -26,25 +30,37 @@ service:
   type: ClusterIP
   externalPort: 443
   internalPort: 8443
-
-serviceAccount:
-  labels: {}
-  #  useful: label
   annotations: {}
-  # Enables GKE workload identity
-  #  iam.gke.io/gcp-service-account: gsa@project.iam.gserviceaccount.com
+  # Annotate service
+  # This can be used for example if type is AWS LoadBalancer and you want to add security groups
+
+ingress:
+  enabled: false
+  annotations: {}
+  # dns of ingress for vault-webhook
+  # host: example.com
+
+webhookClientConfig:
+  # By default the mutating webhook uses the service of the webhook directly to contact webhook
+  # Use url if webhook should be contacted over loadbalancer or ingress instead of service object
+  useUrl: false
+  # set the url how the webhook should be contacted (including protocol https://)
+  # url: https://example.com
 
 vaultEnv:
-  repository: banzaicloud/vault-env
+  repository: ghcr.io/banzaicloud/vault-env
 
 env:
-  VAULT_IMAGE: vault:1.5.0
+  VAULT_IMAGE: vault:1.6.2
   # VAULT_CAPATH: /vault/tls
-  # used when the pod that should get secret injected does not specify
-  # an imagePullSecret
+  # # Used when the pod that should get secret injected does not
+  # # specify an imagePullSecret
   # DEFAULT_IMAGE_PULL_SECRET:
   # DEFAULT_IMAGE_PULL_SECRET_NAMESPACE:
   # VAULT_CLIENT_TIMEOUT: 10s
+  # # define the webhook's role in Vault used for authentication,
+  # # if not defined individually in resources by annotations.
+  # VAULT_ROLE: vault-secrets-webhook
 
 metrics:
   enabled: false
@@ -87,11 +103,23 @@ affinity: {}
 priorityClassName: ""
 
 rbac:
-  enabled: true
   psp:
     enabled: false
   authDelegatorRole:
     enabled: false
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Labels to add to the service account
+  labels: {}
+  # Annotations to add to the service account
+  annotations: {}
+  # Enables GKE workload identity
+  #  iam.gke.io/gcp-service-account: gsa@project.iam.gserviceaccount.com
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
 
 # A list of Kubernetes resource types to mutate as well:
 # Example: ["ingresses", "servicemonitors"]
@@ -130,3 +158,7 @@ objectSelector: {}
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
+
+timeoutSeconds: false
+
+hostNetwork: false

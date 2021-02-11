@@ -16,6 +16,7 @@ package injector
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 
 	"emperror.dev/errors"
@@ -52,13 +53,31 @@ func NewSecretInjector(config Config, client *vault.Client, renewer SecretRenewe
 	return SecretInjector{config: config, client: client, renewer: renewer, logger: logger}
 }
 
+var (
+	InlineMutationRegex = regexp.MustCompile(`\${([>]{0,2}vault:.*?)}`)
+)
+
 func (i SecretInjector) InjectSecretsFromVault(references map[string]string, inject SecretInjectorFunc) error {
 	transitCache := map[string][]byte{}
-	secretData := map[string]map[string]interface{}{}
+	secretCache := map[string]map[string]interface{}{}
 
 	templater := configuration.NewTemplater(configuration.DefaultLeftDelimiter, configuration.DefaultRightDelimiter)
 
 	for name, value := range references {
+		if hasInlineVaultDelimiters(value) {
+			for _, vaultSecretReference := range findInlineVaultDelimiters(value) {
+				mapData, err := getDataFromVault(map[string]string{name: vaultSecretReference[1]}, i)
+				if err != nil {
+					return err
+				}
+				for _, v := range mapData {
+					value = strings.Replace(value, vaultSecretReference[0], v, -1)
+				}
+			}
+			inject(name, value)
+			continue
+		}
+
 		var update bool
 		if strings.HasPrefix(value, ">>vault:") {
 			value = strings.TrimPrefix(value, ">>")
@@ -128,22 +147,24 @@ func (i SecretInjector) InjectSecretsFromVault(references map[string]string, inj
 		var data map[string]interface{}
 		var err error
 
-		if data = secretData[secretCacheKey]; data == nil {
+		if data = secretCache[secretCacheKey]; data == nil {
 			data, err = i.readVaultPath(valuePath, versionOrData, update)
-		}
-
-		if data == nil && err != nil {
-			if !i.config.IgnoreMissingSecrets {
-				return errors.Errorf("path not found: %s", valuePath)
-			}
-
-			i.logger.Errorln("path not found:", valuePath)
-			continue
 		}
 
 		if err != nil {
 			return err
 		}
+
+		if data == nil {
+			if !i.config.IgnoreMissingSecrets {
+				return errors.Errorf("path not found: %s", valuePath)
+			}
+
+			i.logger.Errorf("path not found: %s", valuePath)
+			continue
+		}
+
+		secretCache[secretCacheKey] = data
 
 		if templater.IsGoTemplate(key) {
 			value, err := templater.Template(key, data)
@@ -176,23 +197,22 @@ func (i SecretInjector) InjectSecretsFromVaultPath(paths string, inject SecretIn
 
 		version := "-1"
 
-		if len(split) == 2 {
+		if len(split) > 2 {
 			version = split[2]
 		}
 
 		data, err := i.readVaultPath(valuePath, version, false)
+		if err != nil {
+			return err
+		}
 
-		if data == nil && err != nil {
+		if data == nil {
 			if !i.config.IgnoreMissingSecrets {
 				return errors.Errorf("path not found: %s", valuePath)
 			}
 
 			i.logger.Errorln("path not found:", valuePath)
 			continue
-		}
-
-		if err != nil {
-			return errors.Wrapf(err, "failed to read secret from path: %s", valuePath)
 		}
 
 		for key, value := range data {
@@ -217,31 +237,31 @@ func (i SecretInjector) readVaultPath(path, versionOrData string, update bool) (
 		var data map[string]interface{}
 		err = json.Unmarshal([]byte(versionOrData), &data)
 		if err != nil {
-			return secretData, errors.Wrap(err, "failed to unmarshal data for writing")
+			return nil, errors.Wrap(err, "failed to unmarshal data for writing")
 		}
 
 		secret, err = i.client.RawClient().Logical().Write(path, data)
 		if err != nil {
-			return secretData, errors.Wrapf(err, "failed to write secret to path: %s", path)
+			return nil, errors.Wrapf(err, "failed to write secret to path: %s", path)
 		}
 	} else {
 		secret, err = i.client.RawClient().Logical().ReadWithData(path, map[string][]string{"version": {versionOrData}})
 		if err != nil {
-			return secretData, errors.Wrapf(err, "failed to read secret from path: %s", path)
+			return nil, errors.Wrapf(err, "failed to read secret from path: %s", path)
 		}
 	}
 
-	if i.config.DaemonMode && secret != nil && secret.Renewable && secret.LeaseDuration > 0 {
+	if i.config.DaemonMode && secret != nil && secret.LeaseDuration > 0 {
 		i.logger.Infof("secret %s has a lease duration of %ds, starting renewal", path, secret.LeaseDuration)
 
 		err = i.renewer.Renew(path, secret)
 		if err != nil {
-			return secretData, errors.Wrap(err, "secret renewal can't be established")
+			return nil, errors.Wrap(err, "secret renewal can't be established")
 		}
 	}
 
 	if secret == nil {
-		return nil, errors.Errorf("path not found: %s", path)
+		return nil, nil
 	}
 
 	for _, warning := range secret.Warnings {
@@ -269,4 +289,22 @@ func (i SecretInjector) readVaultPath(path, versionOrData string, update bool) (
 	}
 
 	return secretData, nil
+}
+
+func hasInlineVaultDelimiters(value string) bool {
+	return len(findInlineVaultDelimiters(value)) > 0
+}
+
+func findInlineVaultDelimiters(value string) [][]string {
+	return InlineMutationRegex.FindAllStringSubmatch(value, -1)
+}
+
+func getDataFromVault(data map[string]string, secretInjector SecretInjector) (map[string]string, error) {
+	vaultData := make(map[string]string, len(data))
+
+	inject := func(key, value string) {
+		vaultData[key] = value
+	}
+
+	return vaultData, secretInjector.InjectSecretsFromVault(data, inject)
 }

@@ -15,11 +15,12 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	cmp "github.com/google/go-cmp/cmp"
-	imagev1 "github.com/opencontainers/image-spec/specs-go/v1"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -34,6 +35,7 @@ var vaultConfig = VaultConfig{
 	SkipVerify:           false,
 	Path:                 "path",
 	Role:                 "role",
+	AuthMethod:           "jwt",
 	IgnoreMissingSecrets: "ignoreMissingSecrets",
 	VaultEnvPassThrough:  "vaultEnvPassThrough",
 	EnableJSONLog:        "enableJSONLog",
@@ -41,10 +43,10 @@ var vaultConfig = VaultConfig{
 }
 
 type MockRegistry struct {
-	Image imagev1.ImageConfig
+	Image v1.Config
 }
 
-func (r *MockRegistry) GetImageConfig(_ kubernetes.Interface, _ string, _ *corev1.Container, _ *corev1.PodSpec) (*imagev1.ImageConfig, error) {
+func (r *MockRegistry) GetImageConfig(_ context.Context, _ kubernetes.Interface, _ string, _ *corev1.Container, _ *corev1.PodSpec) (*v1.Config, error) {
 	return &r.Image, nil
 }
 
@@ -74,7 +76,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 			fields: fields{
 				k8sClient: fake.NewSimpleClientset(),
 				registry: &MockRegistry{
-					Image: imagev1.ImageConfig{},
+					Image: v1.Config{},
 				},
 			},
 			args: args{
@@ -105,6 +107,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 						{Name: "myvar", Value: "vault:secrets"},
 						{Name: "VAULT_ADDR", Value: "addr"},
 						{Name: "VAULT_SKIP_VERIFY", Value: "false"},
+						{Name: "VAULT_AUTH_METHOD", Value: "jwt"},
 						{Name: "VAULT_PATH", Value: "path"},
 						{Name: "VAULT_ROLE", Value: "role"},
 						{Name: "VAULT_IGNORE_MISSING_SECRETS", Value: "ignoreMissingSecrets"},
@@ -121,7 +124,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 			fields: fields{
 				k8sClient: fake.NewSimpleClientset(),
 				registry: &MockRegistry{
-					Image: imagev1.ImageConfig{},
+					Image: v1.Config{},
 				},
 			},
 			args: args{
@@ -152,6 +155,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 						{Name: "myvar", Value: ">>vault:secrets"},
 						{Name: "VAULT_ADDR", Value: "addr"},
 						{Name: "VAULT_SKIP_VERIFY", Value: "false"},
+						{Name: "VAULT_AUTH_METHOD", Value: "jwt"},
 						{Name: "VAULT_PATH", Value: "path"},
 						{Name: "VAULT_ROLE", Value: "role"},
 						{Name: "VAULT_IGNORE_MISSING_SECRETS", Value: "ignoreMissingSecrets"},
@@ -168,7 +172,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 			fields: fields{
 				k8sClient: fake.NewSimpleClientset(),
 				registry: &MockRegistry{
-					Image: imagev1.ImageConfig{
+					Image: v1.Config{
 						Entrypoint: []string{"myEntryPoint"},
 					},
 				},
@@ -201,6 +205,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 						{Name: "myvar", Value: ">>vault:secrets"},
 						{Name: "VAULT_ADDR", Value: "addr"},
 						{Name: "VAULT_SKIP_VERIFY", Value: "false"},
+						{Name: "VAULT_AUTH_METHOD", Value: "jwt"},
 						{Name: "VAULT_PATH", Value: "path"},
 						{Name: "VAULT_ROLE", Value: "role"},
 						{Name: "VAULT_IGNORE_MISSING_SECRETS", Value: "ignoreMissingSecrets"},
@@ -217,7 +222,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 			fields: fields{
 				k8sClient: fake.NewSimpleClientset(),
 				registry: &MockRegistry{
-					Image: imagev1.ImageConfig{
+					Image: v1.Config{
 						Cmd: []string{"myCmd"},
 					},
 				},
@@ -250,6 +255,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 						{Name: "myvar", Value: ">>vault:secrets"},
 						{Name: "VAULT_ADDR", Value: "addr"},
 						{Name: "VAULT_SKIP_VERIFY", Value: "false"},
+						{Name: "VAULT_AUTH_METHOD", Value: "jwt"},
 						{Name: "VAULT_PATH", Value: "path"},
 						{Name: "VAULT_ROLE", Value: "role"},
 						{Name: "VAULT_IGNORE_MISSING_SECRETS", Value: "ignoreMissingSecrets"},
@@ -266,7 +272,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 			fields: fields{
 				k8sClient: fake.NewSimpleClientset(),
 				registry: &MockRegistry{
-					Image: imagev1.ImageConfig{},
+					Image: v1.Config{},
 				},
 			},
 			args: args{
@@ -293,7 +299,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 			fields: fields{
 				k8sClient: fake.NewSimpleClientset(),
 				registry: &MockRegistry{
-					Image: imagev1.ImageConfig{},
+					Image: v1.Config{},
 				},
 			},
 			args: args{
@@ -324,6 +330,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 						{Name: "myvar", Value: "vault:secrets"},
 						{Name: "VAULT_ADDR", Value: "addr"},
 						{Name: "VAULT_SKIP_VERIFY", Value: "false"},
+						{Name: "VAULT_AUTH_METHOD", Value: "jwt"},
 						{Name: "VAULT_PATH", Value: "path"},
 						{Name: "VAULT_ROLE", Value: "role"},
 						{Name: "VAULT_IGNORE_MISSING_SECRETS", Value: "ignoreMissingSecrets"},
@@ -331,6 +338,54 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 						{Name: "VAULT_JSON_LOG", Value: "enableJSONLog"},
 						{Name: "VAULT_CLIENT_TIMEOUT", Value: "10s"},
 						{Name: "VAULT_ENV_FROM_PATH", Value: "secrets/application"},
+					},
+				},
+			},
+			mutated: true,
+			wantErr: false,
+		},
+		{name: "Will mutate container with command, no args, with inline mutation",
+			fields: fields{
+				k8sClient: fake.NewSimpleClientset(),
+				registry: &MockRegistry{
+					Image: v1.Config{},
+				},
+			},
+			args: args{
+				containers: []corev1.Container{
+					{
+						Name:    "MyContainer",
+						Image:   "myimage",
+						Command: []string{"/bin/bash"},
+						Args:    nil,
+						Env: []corev1.EnvVar{
+							{
+								Name:  "myvar",
+								Value: "scheme://${vault:secret/data/account#username}:${vault:secret/data/account#password}@127.0.0.1:8080",
+							},
+						},
+					},
+				},
+				vaultConfig: vaultConfig,
+			},
+			wantedContainers: []corev1.Container{
+				{
+					Name:         "MyContainer",
+					Image:        "myimage",
+					Command:      []string{"/vault/vault-env"},
+					Args:         []string{"/bin/bash"},
+					VolumeMounts: []corev1.VolumeMount{{Name: "vault-env", MountPath: "/vault/"}},
+					Env: []corev1.EnvVar{
+						{Name: "myvar", Value: "scheme://${vault:secret/data/account#username}:${vault:secret/data/account#password}@127.0.0.1:8080"},
+						{Name: "VAULT_ADDR", Value: "addr"},
+						{Name: "VAULT_SKIP_VERIFY", Value: "false"},
+						{Name: "VAULT_AUTH_METHOD", Value: "jwt"},
+						{Name: "VAULT_PATH", Value: "path"},
+						{Name: "VAULT_ROLE", Value: "role"},
+						{Name: "VAULT_IGNORE_MISSING_SECRETS", Value: "ignoreMissingSecrets"},
+						{Name: "VAULT_ENV_PASSTHROUGH", Value: "vaultEnvPassThrough"},
+						{Name: "VAULT_JSON_LOG", Value: "enableJSONLog"},
+						{Name: "VAULT_CLIENT_TIMEOUT", Value: "10s"},
 					},
 				},
 			},
@@ -346,7 +401,7 @@ func Test_mutatingWebhook_mutateContainers(t *testing.T) {
 				registry:  tt.fields.registry,
 				logger:    logrus.NewEntry(logrus.New()),
 			}
-			got, err := mw.mutateContainers(tt.args.containers, tt.args.podSpec, tt.args.vaultConfig, tt.args.ns)
+			got, err := mw.mutateContainers(context.Background(), tt.args.containers, tt.args.podSpec, tt.args.vaultConfig, tt.args.ns)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("mutatingWebhook.mutateContainers() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -389,7 +444,7 @@ func Test_mutatingWebhook_mutatePod(t *testing.T) {
 			fields: fields{
 				k8sClient: fake.NewSimpleClientset(),
 				registry: &MockRegistry{
-					Image: imagev1.ImageConfig{},
+					Image: v1.Config{},
 				},
 			},
 			args: args{
@@ -427,7 +482,7 @@ func Test_mutatingWebhook_mutatePod(t *testing.T) {
 						{
 							Name:            "vault-agent",
 							Image:           "vault:latest",
-							Command:         []string{"vault", "agent", "-config=/vault/agent/config.hcl"},
+							Command:         []string{"vault", "agent", "-config=/vault/agent/config.hcl", "-exit-after-auth"},
 							ImagePullPolicy: "IfNotPresent",
 							Env: []corev1.EnvVar{
 								{
@@ -441,6 +496,10 @@ func Test_mutatingWebhook_mutatePod(t *testing.T) {
 							},
 							Resources: corev1.ResourceRequirements{
 								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("250m"),
+									corev1.ResourceMemory: resource.MustParse("64Mi"),
+								},
+								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("50m"),
 									corev1.ResourceMemory: resource.MustParse("64Mi"),
 								},
@@ -574,7 +633,7 @@ func Test_mutatingWebhook_mutatePod(t *testing.T) {
 			fields: fields{
 				k8sClient: fake.NewSimpleClientset(),
 				registry: &MockRegistry{
-					Image: imagev1.ImageConfig{},
+					Image: v1.Config{},
 				},
 			},
 			args: args{
@@ -723,7 +782,7 @@ func Test_mutatingWebhook_mutatePod(t *testing.T) {
 				registry:  tt.fields.registry,
 				logger:    logrus.NewEntry(logrus.New()),
 			}
-			err := mw.mutatePod(tt.args.pod, tt.args.vaultConfig, tt.args.ns, false)
+			err := mw.mutatePod(context.Background(), tt.args.pod, tt.args.vaultConfig, tt.args.ns, false)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("mutatingWebhook.mutatePod() error = %v, wantErr %v", err, tt.wantErr)
 				return

@@ -34,9 +34,9 @@ import (
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	etcdv1beta2 "github.com/coreos/etcd-operator/pkg/apis/etcd/v1beta2"
 	"github.com/coreos/etcd-operator/pkg/util/etcdutil"
-	monitorv1 "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/hashicorp/vault/api"
 	"github.com/imdario/mergo"
+	monitorv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/spf13/cast"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -324,7 +324,7 @@ func (r *ReconcileVault) Reconcile(request reconcile.Request) (reconcile.Result,
 	if service.Spec.Type == corev1.ServiceTypeLoadBalancer && !v.Spec.IsTLSDisabled() && v.Spec.ExistingTLSSecretName == "" {
 		key, err := client.ObjectKeyFromObject(service)
 		if err != nil {
-			return reconcile.Result{}, fmt.Errorf("failed to get objecy key for service: %v", err)
+			return reconcile.Result{}, fmt.Errorf("failed to get object key for service: %v", err)
 		}
 
 		err = r.client.Get(context.Background(), key, service)
@@ -504,62 +504,12 @@ func (r *ReconcileVault) Reconcile(request reconcile.Request) (reconcile.Result,
 		}
 	}
 
-	// Create the configmap if it doesn't exist
-	cm := configMapForConfigurer(v)
-
-	// Set Vault instance as the owner and controller
-	if err := controllerutil.SetControllerReference(v, cm, r.scheme); err != nil {
-		return reconcile.Result{}, err
-	}
-
-	err = r.createOrUpdateObject(cm)
-	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("failed to create/update configurer configmap: %v", err)
-	}
-
-	externalConfigMaps := corev1.ConfigMapList{}
-	externalConfigMapsFilter := client.ListOptions{
-		LabelSelector: labels.SelectorFromSet(v.LabelsForVaultConfigurer()),
-		Namespace:     v.Namespace,
-	}
-	if err = r.client.List(context.TODO(), &externalConfigMaps, &externalConfigMapsFilter); err != nil {
-		return reconcile.Result{}, fmt.Errorf("failed to list configmaps: %v", err)
-	}
-
-	externalSecrets := corev1.SecretList{}
-	externalSecretsFilter := client.ListOptions{
-		LabelSelector: labels.SelectorFromSet(v.LabelsForVaultConfigurer()),
-		Namespace:     v.Namespace,
-	}
-	if err = r.client.List(context.TODO(), &externalSecrets, &externalSecretsFilter); err != nil {
-		return reconcile.Result{}, fmt.Errorf("failed to list secrets: %v", err)
-	}
-
-	// Create the deployment if it doesn't exist
-	configurerDep, err := deploymentForConfigurer(v, externalConfigMaps, externalSecrets, tlsAnnotations)
-	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("failed to fabricate deployment: %v", err)
-	}
-
-	// Set Vault instance as the owner and controller
-	if err := controllerutil.SetControllerReference(v, configurerDep, r.scheme); err != nil {
-		return reconcile.Result{}, err
-	}
-	err = r.createOrUpdateObject(configurerDep)
-	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("failed to create/update configurer deployment: %v", err)
-	}
-
-	// Create the Configurer service if it doesn't exist
-	configurerSer := serviceForVaultConfigurer(v)
-	// Set Vault instance as the owner and controller
-	if err := controllerutil.SetControllerReference(v, configurerSer, r.scheme); err != nil {
-		return reconcile.Result{}, err
-	}
-
-	err = r.createOrUpdateObject(configurerSer)
-	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("failed to create/update service: %v", err)
+	// Create configurer if there is any external config
+	if len(v.Spec.ExternalConfig.Raw) != 0 {
+		err := r.deployConfigurer(v, tlsAnnotations)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 
 	// Create ingress if specificed
@@ -623,13 +573,15 @@ func (r *ReconcileVault) Reconcile(request reconcile.Request) (reconcile.Result,
 		return reconcile.Result{}, err
 	}
 
-	if !reflect.DeepEqual(podNames, v.Status.Nodes) || !reflect.DeepEqual(leader, v.Status.Leader) {
+	conditionStatus := v1.ConditionFalse
+	if leader != "" && statusError == "" {
+		conditionStatus = v1.ConditionTrue
+	}
+
+	if !reflect.DeepEqual(podNames, v.Status.Nodes) || !reflect.DeepEqual(leader, v.Status.Leader) || len(v.Status.Conditions) == 0 ||
+		v.Status.Conditions[0].Status != conditionStatus || v.Status.Conditions[0].Error != statusError {
 		v.Status.Nodes = podNames
 		v.Status.Leader = leader
-		conditionStatus := v1.ConditionFalse
-		if leader != "" && statusError == "" {
-			conditionStatus = v1.ConditionTrue
-		}
 		v.Status.Conditions = []v1.ComponentCondition{{
 			Type:   v1.ComponentHealthy,
 			Status: conditionStatus,
@@ -716,7 +668,7 @@ func etcdForVault(v *vaultv1alpha1.Vault) (*etcdv1beta2.EtcdCluster, error) {
 	etcdCluster.Spec.Repository = v.Spec.EtcdRepository
 	etcdCluster.Spec.Pod = &etcdv1beta2.PodPolicy{
 		PersistentVolumeClaimSpec: v.Spec.EtcdPVCSpec,
-		Resources:                 *getEtcdResource(v),
+		Resources:                 getEtcdResource(v),
 		Annotations:               v.Spec.EtcdPodAnnotations,
 		BusyboxImage:              v.Spec.EtcdPodBusyBoxImage,
 		Affinity:                  getEtcdAffinity(v, etcdName),
@@ -736,9 +688,15 @@ func etcdForVault(v *vaultv1alpha1.Vault) (*etcdv1beta2.EtcdCluster, error) {
 
 func serviceForVault(v *vaultv1alpha1.Vault) *corev1.Service {
 	ls := v.LabelsForVault()
-	selectorLs := v.LabelsForVault()
-	// Label to differentiate per-instance service and global service via label selection
+	// label to differentiate per-instance service and global service via label selection
 	ls["global_service"] = "true"
+
+	selectorLs := v.LabelsForVault()
+	// add the service_registration label
+	if v.Spec.ServiceRegistrationEnabled {
+		selectorLs["vault-active"] = "true"
+	}
+
 	servicePorts, _ := getServicePorts(v)
 
 	annotations := withVaultAnnotations(v, getCommonAnnotations(v, map[string]string{}))
@@ -761,6 +719,8 @@ func serviceForVault(v *vaultv1alpha1.Vault) *corev1.Service {
 			Type:     serviceType(v),
 			Selector: selectorLs,
 			Ports:    servicePorts,
+			// Optional setting for requesting specific load balancer ip addresses.
+			LoadBalancerIP: v.Spec.LoadBalancerIP,
 			// In case of multi-cluster deployments we need to publish the port
 			// before being considered ready, otherwise the LoadBalancer won't
 			// be able to direct traffic from the leader to the joining instance.
@@ -782,6 +742,12 @@ func serviceMonitorForVault(v *vaultv1alpha1.Vault) *monitorv1.ServiceMonitor {
 			JobLabel: v.Name,
 			Selector: metav1.LabelSelector{
 				MatchLabels: ls,
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{
+						Key:      appsv1.StatefulSetPodNameLabel,
+						Operator: metav1.LabelSelectorOpExists,
+					},
+				},
 			},
 			NamespaceSelector: monitorv1.NamespaceSelector{
 				MatchNames: []string{v.Namespace},
@@ -792,17 +758,22 @@ func serviceMonitorForVault(v *vaultv1alpha1.Vault) *monitorv1.ServiceMonitor {
 	vaultVersionWithPrometheus := semver.MustParse("1.1.0")
 	version, err := v.Spec.GetVersion()
 	if err == nil && !version.LessThan(vaultVersionWithPrometheus) {
-		serviceMonitor.Spec.Endpoints = []monitorv1.Endpoint{{
+		endpoint := monitorv1.Endpoint{
 			Interval: "30s",
 			Port:     v.Spec.GetAPIPortName(),
 			Scheme:   strings.ToLower(string(getVaultURIScheme(v))),
 			Params:   map[string][]string{"format": {"prometheus"}},
 			Path:     "/v1/sys/metrics",
 			TLSConfig: &monitorv1.TLSConfig{
-				InsecureSkipVerify: true,
+				SafeTLSConfig: monitorv1.SafeTLSConfig{
+					InsecureSkipVerify: true,
+				},
 			},
-			BearerTokenFile: fmt.Sprintf("/etc/prometheus/config_out/.%s-token", v.Name),
-		}}
+		}
+		if !v.Spec.IsTelemetryUnauthenticated() {
+			endpoint.BearerTokenFile = fmt.Sprintf("/etc/prometheus/config_out/.%s-token", v.Name)
+		}
+		serviceMonitor.Spec.Endpoints = []monitorv1.Endpoint{endpoint}
 	} else {
 		serviceMonitor.Spec.Endpoints = []monitorv1.Endpoint{{
 			Interval: "30s",
@@ -1047,7 +1018,7 @@ func deploymentForConfigurer(v *vaultv1alpha1.Vault, configmaps corev1.ConfigMap
 				Env:          withNamespaceEnv(v, withCommonEnv(v, withTLSEnv(v, false, withCredentialsEnv(v, []corev1.EnvVar{})))),
 				VolumeMounts: withHSMVolumeMount(v, withTLSVolumeMount(v, withCredentialsVolumeMount(v, volumeMounts))),
 				WorkingDir:   "/config",
-				Resources:    *getBankVaultsResource(v),
+				Resources:    getBankVaultsResource(v),
 			},
 		},
 		Volumes:         withHSMVolume(v, withTLSVolume(v, withCredentialsVolume(v, volumes))),
@@ -1059,8 +1030,10 @@ func deploymentForConfigurer(v *vaultv1alpha1.Vault, configmaps corev1.ConfigMap
 
 	// merge provided VaultConfigurerPodSpec into the PodSpec defined above
 	// the values in VaultConfigurerPodSpec will never overwrite fields defined in the PodSpec above
-	if err := mergo.Merge(&podSpec, v.Spec.VaultConfigurerPodSpec); err != nil {
-		return nil, err
+	if v.Spec.VaultConfigurerPodSpec != nil {
+		if err := mergo.Merge(&podSpec, v1.PodSpec(*v.Spec.VaultConfigurerPodSpec)); err != nil {
+			return nil, err
+		}
 	}
 
 	dep := &appsv1.Deployment{
@@ -1133,12 +1106,20 @@ func hostsAndIPsForVault(v *vaultv1alpha1.Vault, service *corev1.Service) []stri
 
 func loadBalancerIngressPoints(service *corev1.Service) []string {
 	var hostsAndIPs []string
-	for _, ingress := range service.Status.LoadBalancer.Ingress {
-		if ingress.IP != "" {
-			hostsAndIPs = append(hostsAndIPs, ingress.IP)
-		}
-		if ingress.Hostname != "" {
-			hostsAndIPs = append(hostsAndIPs, ingress.Hostname)
+
+	// Use defined IP
+	if service.Spec.LoadBalancerIP != "" {
+		hostsAndIPs = append(hostsAndIPs, service.Spec.LoadBalancerIP)
+
+		// Use allocated IP or Hostname
+	} else {
+		for _, ingress := range service.Status.LoadBalancer.Ingress {
+			if ingress.IP != "" {
+				hostsAndIPs = append(hostsAndIPs, ingress.IP)
+			}
+			if ingress.Hostname != "" {
+				hostsAndIPs = append(hostsAndIPs, ingress.Hostname)
+			}
 		}
 	}
 	return hostsAndIPs
@@ -1244,13 +1225,8 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 	// No need to override etcd config, and use user input value
 	if v.Spec.HasEtcdStorage() && v.Spec.GetEtcdSize() > 0 {
 
-		// Overwrite Vault config with the generated TLS certificate's settings
-		etcdStorage := v.Spec.GetEtcdStorage()
-		etcdStorage["tls_ca_file"] = "/etcd/tls/" + etcdutil.CliCAFile
-		etcdStorage["tls_cert_file"] = "/etcd/tls/" + etcdutil.CliCertFile
-		etcdStorage["tls_key_file"] = "/etcd/tls/" + etcdutil.CliKeyFile
-
 		// Mount the Secret holding the certificate into Vault
+		etcdStorage := v.Spec.GetEtcdStorage()
 		etcdAddress := etcdStorage["address"].(string)
 		etcdURL, err := url.Parse(etcdAddress)
 		if err != nil {
@@ -1293,9 +1269,14 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 		if v.Spec.IsRaftBootstrapFollower() {
 			unsealCommand = append(unsealCommand, "--raft-secondary")
 		}
+	} else if v.Spec.IsRaftHAStorage() {
+		unsealCommand = append(unsealCommand, "--raft-ha-storage")
 	}
 
-	configJSON := v.Spec.ConfigJSON()
+	configJSON, err := v.ConfigJSON()
+	if err != nil {
+		return nil, err
+	}
 
 	_, containerPorts := getServicePorts(v)
 
@@ -1306,7 +1287,16 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 			Name:            "vault",
 			Args:            []string{"server"},
 			Ports:           containerPorts,
-			Env:             withClusterAddr(v, service, withCredentialsEnv(v, withVaultEnv(v, []corev1.EnvVar{}))),
+			Env: withClusterAddr(v, service, withCredentialsEnv(v, withVaultEnv(v, []corev1.EnvVar{
+				{
+					Name: "VAULT_K8S_POD_NAME",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.name",
+						},
+					},
+				},
+			}))),
 			SecurityContext: withContainerSecurityContext(v),
 			// This probe makes sure Vault is responsive in a HTTPS manner
 			// See: https://www.vaultproject.io/api/system/init.html
@@ -1325,13 +1315,13 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 					HTTPGet: &corev1.HTTPGetAction{
 						Scheme: getVaultURIScheme(v),
 						Port:   intstr.FromString(v.Spec.GetAPIPortName()),
-						Path:   "/v1/sys/health?standbyok=true&perfstandbyok=true",
+						Path:   "/v1/sys/health?standbyok=true&perfstandbyok=true&drsecondarycode=299",
 					}},
 				PeriodSeconds:    5,
 				FailureThreshold: 2,
 			},
 			VolumeMounts: withVaultVolumeMounts(v, volumeMounts),
-			Resources:    *getVaultResource(v),
+			Resources:    getVaultResource(v),
 		},
 		{
 			Image:           v.Spec.GetBankVaultsImage(),
@@ -1355,7 +1345,7 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 				Protocol:      "TCP",
 			}},
 			VolumeMounts: withHSMVolumeMount(v, withBanksVaultsVolumeMounts(v, withTLSVolumeMount(v, withCredentialsVolumeMount(v, []corev1.VolumeMount{})))),
-			Resources:    *getBankVaultsResource(v),
+			Resources:    getBankVaultsResource(v),
 		},
 	})))
 
@@ -1366,7 +1356,7 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 			Name:            "bank-vaults-hsm-pcscd",
 			Command:         []string{"pcscd-entrypoint.sh"},
 			VolumeMounts:    withHSMVolumeMount(v, nil),
-			Resources:       *getHSMDaemonResource(v),
+			Resources:       getHSMDaemonResource(v),
 			SecurityContext: &corev1.SecurityContext{
 				Privileged: pointer.BoolPtr(true),
 				RunAsUser:  pointer.Int64Ptr(0),
@@ -1374,11 +1364,16 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 		})
 	}
 
+	affinity := &corev1.Affinity{
+		PodAntiAffinity: getPodAntiAffinity(v),
+		NodeAffinity:    getNodeAffinity(v),
+	}
+	if v.Spec.Affinity != nil {
+		affinity = v.Spec.Affinity
+	}
+
 	podSpec := corev1.PodSpec{
-		Affinity: &corev1.Affinity{
-			PodAntiAffinity: getPodAntiAffinity(v),
-			NodeAffinity:    getNodeAffinity(v),
-		},
+		Affinity: affinity,
 
 		ServiceAccountName:           v.Spec.GetServiceAccount(),
 		AutomountServiceAccountToken: pointer.BoolPtr(true),
@@ -1404,7 +1399,7 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 					},
 				})),
 				VolumeMounts: withVaultVolumeMounts(v, volumeMounts),
-				Resources:    *getVaultResource(v),
+				Resources:    getVaultResource(v),
 			},
 		}),
 
@@ -1417,12 +1412,20 @@ func statefulSetForVault(v *vaultv1alpha1.Vault, externalSecretsToWatchItems []c
 
 	// merge provided VaultPodSpec into the PodSpec defined above
 	// the values in VaultPodSpec will never overwrite fields defined in the PodSpec above
-	if err := mergo.MergeWithOverwrite(&podSpec, v.Spec.VaultPodSpec); err != nil {
+	if v.Spec.VaultPodSpec != nil {
+		if err := mergo.Merge(&podSpec, v1.PodSpec(*v.Spec.VaultPodSpec), mergo.WithOverride); err != nil {
+			return nil, err
+		}
+	}
+
+	// merge provided VaultContainerSpec into the Vault Container defined above
+	// the values in VaultContainerSpec will never overwrite fields defined in the PodSpec above
+	if err := mergo.Merge(&podSpec.Containers[0], v.Spec.VaultContainerSpec, mergo.WithOverride); err != nil {
 		return nil, err
 	}
 
 	podManagementPolicy := appsv1.ParallelPodManagement
-	if v.Spec.IsRaftStorage() {
+	if v.Spec.IsRaftStorage() || v.Spec.IsRaftHAStorage() {
 		podManagementPolicy = appsv1.OrderedReadyPodManagement
 	}
 
@@ -1669,7 +1672,6 @@ func withCredentialsEnv(v *vaultv1alpha1.Vault, envs []corev1.EnvVar) []corev1.E
 // withClusterAddr overrides cluster_addr with the env var in multi-cluster deployments
 func withClusterAddr(v *vaultv1alpha1.Vault, service *corev1.Service, envs []corev1.EnvVar) []corev1.EnvVar {
 	value := ""
-
 	ingressPoints := loadBalancerIngressPoints(service)
 
 	if len(ingressPoints) > 0 {
@@ -1789,7 +1791,8 @@ func withStatsDContainer(v *vaultv1alpha1.Vault, containers []corev1.Container) 
 				Name:      "statsd-mapping",
 				MountPath: "/tmp/",
 			}},
-			Resources: *getPrometheusExporterResource(v),
+			Resources: getPrometheusExporterResource(v),
+			Env:       withSidecarEnv(v, []v1.EnvVar{}),
 		})
 	}
 	return containers
@@ -1842,9 +1845,11 @@ func withAuditLogContainer(v *vaultv1alpha1.Vault, containers []corev1.Container
 				},
 				{
 					Name:      "fluentd-config",
-					MountPath: "/fluentd/etc",
+					MountPath: v.Spec.GetFluentDConfMountPath(),
 				},
 			}),
+			Resources: getFluentDResource(v),
+			Env:       withSidecarEnv(v, []v1.EnvVar{}),
 		})
 	}
 	return containers
@@ -2008,7 +2013,8 @@ func withNamespaceEnv(v *vaultv1alpha1.Vault, envs []corev1.EnvVar) []corev1.Env
 }
 
 func withContainerSecurityContext(v *vaultv1alpha1.Vault) *corev1.SecurityContext {
-	if cast.ToBool(v.Spec.Config["disable_mlock"]) {
+	config := v.Spec.GetVaultConfig()
+	if cast.ToBool(config["disable_mlock"]) {
 		return &corev1.SecurityContext{}
 	}
 	return &corev1.SecurityContext{
@@ -2077,12 +2083,12 @@ func getPodNames(pods []corev1.Pod) []string {
 }
 
 // getVaultResource return resource in spec or return pre-defined resource if not configurated
-func getVaultResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements {
+func getVaultResource(v *vaultv1alpha1.Vault) corev1.ResourceRequirements {
 	if v.Spec.Resources != nil && v.Spec.Resources.Vault != nil {
-		return v.Spec.Resources.Vault
+		return *v.Spec.Resources.Vault
 	}
 
-	return &corev1.ResourceRequirements{
+	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("250m"),
 			corev1.ResourceMemory: resource.MustParse("256Mi"),
@@ -2095,12 +2101,12 @@ func getVaultResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements {
 }
 
 // getBankVaultsResource return resource in spec or return pre-defined resource if not configurated
-func getBankVaultsResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements {
+func getBankVaultsResource(v *vaultv1alpha1.Vault) corev1.ResourceRequirements {
 	if v.Spec.Resources != nil && v.Spec.Resources.BankVaults != nil {
-		return v.Spec.Resources.BankVaults
+		return *v.Spec.Resources.BankVaults
 	}
 
-	return &corev1.ResourceRequirements{
+	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("100m"),
 			corev1.ResourceMemory: resource.MustParse("64Mi"),
@@ -2113,12 +2119,12 @@ func getBankVaultsResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements 
 }
 
 // getEtcdResource return resource in spec or return pre-defined resource if not configurated
-func getEtcdResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements {
+func getEtcdResource(v *vaultv1alpha1.Vault) corev1.ResourceRequirements {
 	if v.Spec.Resources != nil && v.Spec.Resources.Etcd != nil {
-		return v.Spec.Resources.Etcd
+		return *v.Spec.Resources.Etcd
 	}
 
-	return &corev1.ResourceRequirements{
+	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("100m"),
 			corev1.ResourceMemory: resource.MustParse("64Mi"),
@@ -2131,12 +2137,12 @@ func getEtcdResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements {
 }
 
 // getHSMDaemonResource return resource in spec or return pre-defined resource if not configurated
-func getHSMDaemonResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements {
+func getHSMDaemonResource(v *vaultv1alpha1.Vault) corev1.ResourceRequirements {
 	if v.Spec.Resources != nil && v.Spec.Resources.HSMDaemon != nil {
-		return v.Spec.Resources.HSMDaemon
+		return *v.Spec.Resources.HSMDaemon
 	}
 
-	return &corev1.ResourceRequirements{
+	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("100m"),
 			corev1.ResourceMemory: resource.MustParse("64Mi"),
@@ -2149,12 +2155,30 @@ func getHSMDaemonResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements {
 }
 
 // getPrometheusExporterResource return resource in spec or return pre-defined resource if not configurated
-func getPrometheusExporterResource(v *vaultv1alpha1.Vault) *corev1.ResourceRequirements {
+func getPrometheusExporterResource(v *vaultv1alpha1.Vault) corev1.ResourceRequirements {
 	if v.Spec.Resources != nil && v.Spec.Resources.PrometheusExporter != nil {
-		return v.Spec.Resources.PrometheusExporter
+		return *v.Spec.Resources.PrometheusExporter
 	}
 
-	return &corev1.ResourceRequirements{
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("200m"),
+			corev1.ResourceMemory: resource.MustParse("128Mi"),
+		},
+	}
+}
+
+// getFluentDResource return resource in spec or return pre-defined resource if not configurated
+func getFluentDResource(v *vaultv1alpha1.Vault) corev1.ResourceRequirements {
+	if v.Spec.Resources != nil && v.Spec.Resources.FluentD != nil {
+		return *v.Spec.Resources.FluentD
+	}
+
+	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("100m"),
 			corev1.ResourceMemory: resource.MustParse("64Mi"),
@@ -2175,10 +2199,10 @@ func (r *ReconcileVault) distributeCACertificate(v *vaultv1alpha1.Vault, caSecre
 	}
 
 	// We need the CA certificate only
-	if currentSecret.Type == "kubernetes.io/tls" {
-		currentSecret.Type = "Opaque"
-		delete(currentSecret.Data, "tls.crt")
-		delete(currentSecret.Data, "tls.key")
+	if currentSecret.Type == v1.SecretTypeTLS {
+		currentSecret.Type = v1.SecretTypeOpaque
+		delete(currentSecret.Data, v1.TLSCertKey)
+		delete(currentSecret.Data, v1.TLSPrivateKeyKey)
 		if err := controllerutil.SetControllerReference(v, &currentSecret, r.scheme); err != nil {
 			return fmt.Errorf("failed to set current secret controller reference: %v", err)
 		}
@@ -2228,4 +2252,67 @@ func (r *ReconcileVault) distributeCACertificate(v *vaultv1alpha1.Vault, caSecre
 func certHostsAndIPsChanged(v *vaultv1alpha1.Vault, service *corev1.Service, cert *x509.Certificate) bool {
 	// TODO very weak check for now
 	return len(cert.DNSNames)+len(cert.IPAddresses) != len(hostsAndIPsForVault(v, service))
+}
+
+func (r *ReconcileVault) deployConfigurer(v *vaultv1alpha1.Vault, tlsAnnotations map[string]string) error {
+	// Create the configmap if it doesn't exist
+	cm := configMapForConfigurer(v)
+
+	// Set Vault instance as the owner and controller
+	err := controllerutil.SetControllerReference(v, cm, r.scheme)
+	if err != nil {
+		return err
+	}
+
+	err = r.createOrUpdateObject(cm)
+	if err != nil {
+		return fmt.Errorf("failed to create/update configurer configmap: %v", err)
+	}
+
+	externalConfigMaps := corev1.ConfigMapList{}
+	externalConfigMapsFilter := client.ListOptions{
+		LabelSelector: labels.SelectorFromSet(v.LabelsForVaultConfigurer()),
+		Namespace:     v.Namespace,
+	}
+	if err = r.client.List(context.TODO(), &externalConfigMaps, &externalConfigMapsFilter); err != nil {
+		return fmt.Errorf("failed to list configmaps: %v", err)
+	}
+
+	externalSecrets := corev1.SecretList{}
+	externalSecretsFilter := client.ListOptions{
+		LabelSelector: labels.SelectorFromSet(v.LabelsForVaultConfigurer()),
+		Namespace:     v.Namespace,
+	}
+	if err = r.client.List(context.TODO(), &externalSecrets, &externalSecretsFilter); err != nil {
+		return fmt.Errorf("failed to list secrets: %v", err)
+	}
+
+	// Create the deployment if it doesn't exist
+	configurerDep, err := deploymentForConfigurer(v, externalConfigMaps, externalSecrets, tlsAnnotations)
+	if err != nil {
+		return fmt.Errorf("failed to fabricate deployment: %v", err)
+	}
+
+	// Set Vault instance as the owner and controller
+	if err := controllerutil.SetControllerReference(v, configurerDep, r.scheme); err != nil {
+		return err
+	}
+	err = r.createOrUpdateObject(configurerDep)
+	if err != nil {
+		return fmt.Errorf("failed to create/update configurer deployment: %v", err)
+	}
+
+	// Create the Configurer service if it doesn't exist
+	configurerSer := serviceForVaultConfigurer(v)
+	// Set Vault instance as the owner and controller
+	if err := controllerutil.SetControllerReference(v, configurerSer, r.scheme); err != nil {
+		return err
+	}
+
+	err = r.createOrUpdateObject(configurerSer)
+	if err != nil {
+		return fmt.Errorf("failed to create/update service: %v", err)
+	}
+
+	return nil
 }

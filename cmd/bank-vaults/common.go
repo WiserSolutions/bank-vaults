@@ -15,6 +15,8 @@
 package main
 
 import (
+	"os"
+
 	"emperror.dev/errors"
 	"github.com/spf13/viper"
 
@@ -35,18 +37,16 @@ import (
 	kvvault "github.com/banzaicloud/bank-vaults/pkg/kv/vault"
 )
 
-// TODO review this function's returned error
-// nolint: unparam
-func vaultConfigForConfig(_ *viper.Viper) (internalVault.Config, error) {
+func vaultConfigForConfig(c *viper.Viper) internalVault.Config {
 	return internalVault.Config{
-		SecretShares:    appConfig.GetInt(cfgSecretShares),
-		SecretThreshold: appConfig.GetInt(cfgSecretThreshold),
+		SecretShares:    c.GetInt(cfgSecretShares),
+		SecretThreshold: c.GetInt(cfgSecretThreshold),
 
-		InitRootToken:  appConfig.GetString(cfgInitRootToken),
-		StoreRootToken: appConfig.GetBool(cfgStoreRootToken),
+		InitRootToken:  c.GetString(cfgInitRootToken),
+		StoreRootToken: c.GetBool(cfgStoreRootToken),
 
-		PreFlightChecks: appConfig.GetBool(cfgPreFlightChecks),
-	}, nil
+		PreFlightChecks: c.GetBool(cfgPreFlightChecks),
+	}
 }
 
 // all returns true if all values of a string slice are equal to target value
@@ -105,6 +105,19 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 		s3SSEAlgos := cfg.GetStringSlice(cfgAWS3SSEAlgo)
 		kmsRegions := cfg.GetStringSlice(cfgAWSKMSRegion)
 		kmsKeyIDs := cfg.GetStringSlice(cfgAWSKMSKeyID)
+
+		// Try to use the standard AWS region
+		// setting if not provided for KMS/S3
+		awsRegion := os.Getenv("AWS_REGION")
+		if awsRegion == "" {
+			awsRegion = os.Getenv("AWS_DEFAULT_REGION")
+		}
+		if len(s3Regions) == 0 && awsRegion != "" {
+			s3Regions = []string{awsRegion}
+		}
+		if len(kmsRegions) == 0 && awsRegion != "" {
+			kmsRegions = []string{awsRegion}
+		}
 
 		if len(s3Regions) != len(s3Buckets) {
 			return nil, errors.Errorf("specify the same number of regions and buckets for AWS S3 kv store [%d != %d]", len(s3Regions), len(s3Buckets))
@@ -292,6 +305,6 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 		return file, nil
 
 	default:
-		return nil, errors.Errorf("unsupported backend mode: '%s'", cfg.GetString(cfgMode))
+		return nil, errors.Errorf("unsupported backend mode: '%s'", mode)
 	}
 }

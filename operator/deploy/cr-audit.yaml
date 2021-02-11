@@ -4,8 +4,8 @@ metadata:
   name: "vault"
 spec:
   size: 1
-  image: vault:1.5.0
-  
+  image: vault:1.6.2
+
   # Specify the ServiceAccount where the Vault Pod and the Bank-Vaults configurer/unsealer is running
   serviceAccount: vault
 
@@ -24,6 +24,7 @@ spec:
 
   fluentdEnabled: true
   fluentdImage: banzaicloud/fluentd-s3:latest
+  fleuntdConfLocation: "/fluentd/etc"
   fluentdConfig: |
     <source>
       @type tail
@@ -54,7 +55,7 @@ spec:
   # kubectl create secret generic aws-access-key \
   # --from-literal=aws-access-key-id=$AWS_ACCESS_KEY_ID \
   # --from-literal=aws-secret-access-key=$AWS_SECRET_ACCESS_KEY
-  envsConfig:
+  sidecarEnvsConfig:
     - name: AWS_ACCESS_KEY_ID
       valueFrom:
         secretKeyRef:

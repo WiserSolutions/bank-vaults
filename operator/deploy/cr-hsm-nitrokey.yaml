@@ -4,16 +4,16 @@ metadata:
   name: "vault"
 spec:
   size: 1
-  image: vault:1.5.0
-  
+  image: vault:1.6.2
+
   # Common annotations for all created resources
   annotations:
     common/annotation: "true"
-  
+
   # Vault Pods , Services and TLS Secret annotations
   vaultAnnotations:
     type/instance: "vault"
-  
+
   # Vault Configurer Pods and Services annotations
   vaultConfigurerAnnotations:
     type/instance: "vaultconfigurer"
@@ -26,14 +26,15 @@ spec:
   vaultConfigurerLabels:
     example.com/log-format: "string"
 
-  # Support for nodeAffinity Rules
-  # nodeAffinity:
-  #   requiredDuringSchedulingIgnoredDuringExecution:
-  #     nodeSelectorTerms:
-  #     - matchExpressions:
-  #       - key : "node-role.kubernetes.io/your_role"
-  #         operator: In
-  #         values: ["true"]
+  # Support for affinity Rules
+  # affinity:
+  #   nodeAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       nodeSelectorTerms:
+  #       - matchExpressions:
+  #         - key : "node-role.kubernetes.io/your_role"
+  #           operator: In
+  #           values: ["true"]
 
   # Support for pod nodeSelector rules to control which nodes can be chosen to run
   # the given pods
@@ -109,7 +110,7 @@ spec:
     api_addr: https://vault.default:8200
     cluster_addr: "https://${.Env.POD_NAME}:8201"
     ui: true
-  
+
   statsdDisabled: true
 
   # See: https://banzaicloud.com/docs/bank-vaults/cli-tool/#example-external-vault-configuration

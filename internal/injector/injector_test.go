@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build integration
+// fbuild integration
 
 package injector
 
@@ -22,10 +22,10 @@ import (
 	"testing"
 
 	vaultapi "github.com/hashicorp/vault/api"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/banzaicloud/bank-vaults/pkg/sdk/vault"
-	"github.com/sirupsen/logrus"
 )
 
 func TestSecretInjector(t *testing.T) {
@@ -52,7 +52,10 @@ func TestSecretInjector(t *testing.T) {
 
 	ciphertext := secret.Data["ciphertext"].(string)
 
-	_, err = client.RawClient().Logical().Write("secret/data/account", vault.NewData(0, map[string]interface{}{"password": "secret"}))
+	_, err = client.RawClient().Logical().Write("secret/data/account", vault.NewData(0, map[string]interface{}{"username": "superusername", "password": "secret"}))
+	assert.NoError(t, err)
+
+	err = client.RawClient().Sys().Mount("pki", &vaultapi.MountInput{Type: "pki"})
 	assert.NoError(t, err)
 
 	defer func() {
@@ -60,6 +63,9 @@ func TestSecretInjector(t *testing.T) {
 		assert.NoError(t, err)
 
 		_, err = client.RawClient().Logical().Delete("secret/metadata/account")
+		assert.NoError(t, err)
+
+		err = client.RawClient().Sys().Unmount("pki")
 		assert.NoError(t, err)
 	}()
 
@@ -69,6 +75,9 @@ func TestSecretInjector(t *testing.T) {
 		references := map[string]string{
 			"ACCOUNT_PASSWORD": "vault:secret/data/account#password",
 			"TRANSIT_SECRET":   `>>vault:transit/decrypt/mykey#${.plaintext | b64dec}#{"ciphertext":"` + ciphertext + `"}`,
+			"ROOT_CERT":        ">>vault:pki/root/generate/internal#certificate",
+			"ROOT_CERT_CACHED": ">>vault:pki/root/generate/internal#certificate",
+			"INLINE_SECRET":    "scheme://${vault:secret/data/account#username}:${vault:secret/data/account#password}@127.0.0.1:8080",
 		}
 
 		results := map[string]string{}
@@ -79,9 +88,16 @@ func TestSecretInjector(t *testing.T) {
 		err = injector.InjectSecretsFromVault(references, injectFunc)
 		assert.NoError(t, err)
 
+		// This tests caching of dynamic secrets in calls. We can't predict
+		// the value, but it is enough checking if they are present and equal.
+		assert.Equal(t, results["ROOT_CERT"], results["ROOT_CERT_CACHED"])
+		delete(results, "ROOT_CERT")
+		delete(results, "ROOT_CERT_CACHED")
+
 		assert.Equal(t, map[string]string{
 			"ACCOUNT_PASSWORD": "secret",
 			"TRANSIT_SECRET":   "secret",
+			"INLINE_SECRET":    "scheme://superusername:secret@127.0.0.1:8080",
 		}, results)
 	})
 
@@ -110,7 +126,7 @@ func TestSecretInjector(t *testing.T) {
 		}
 
 		err = injector.InjectSecretsFromVault(references, injectFunc)
-		assert.EqualError(t, err, "key 'data' not found under path: secret/get/data")
+		assert.EqualError(t, err, "path not found: secret/get/data")
 	})
 }
 

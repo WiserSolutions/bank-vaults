@@ -24,22 +24,50 @@ import (
 	dockerTypes "github.com/docker/docker/api/types"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/banzaicloud/bank-vaults/cmd/vault-secrets-webhook/registry"
 	"github.com/banzaicloud/bank-vaults/pkg/sdk/vault"
 )
 
-func secretNeedsMutation(secret *corev1.Secret) bool {
+type dockerCreds struct {
+	Auths map[string]dockerTypes.AuthConfig `json:"auths"`
+}
+
+func secretNeedsMutation(secret *corev1.Secret, vaultConfig VaultConfig) (bool, error) {
 	for key, value := range secret.Data {
-		if key == corev1.DockerConfigJsonKey || hasVaultPrefix(string(value)) {
-			return true
+		if key == corev1.DockerConfigJsonKey {
+			var dc dockerCreds
+			err := json.Unmarshal(value, &dc)
+			if err != nil {
+				return false, errors.Wrap(err, "unmarshal dockerconfig json failed")
+			}
+
+			for _, creds := range dc.Auths {
+				authBytes, err := base64.StdEncoding.DecodeString(creds.Auth)
+				if err != nil {
+					return false, errors.Wrap(err, "auth base64 decoding failed")
+				}
+
+				auth := string(authBytes)
+				if hasVaultPrefix(auth) {
+					return true, nil
+				}
+			}
+		} else if hasVaultPrefix(string(value)) {
+			return true, nil
+		} else if vaultConfig.InlineMutation && hasInlineVaultDelimiters(string(value)) {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func (mw *mutatingWebhook) mutateSecret(secret *corev1.Secret, vaultConfig VaultConfig) error {
 	// do an early exit and don't construct the Vault client if not needed
-	if !secretNeedsMutation(secret) {
+	requiredToMutate, err := secretNeedsMutation(secret, vaultConfig)
+	if err != nil {
+		return errors.Wrap(err, "failed to check if secret needs to be mutated")
+	}
+
+	if !requiredToMutate {
 		return nil
 	}
 
@@ -52,7 +80,7 @@ func (mw *mutatingWebhook) mutateSecret(secret *corev1.Secret, vaultConfig Vault
 
 	for key, value := range secret.Data {
 		if key == corev1.DockerConfigJsonKey {
-			var dc registry.DockerCreds
+			var dc dockerCreds
 			err := json.Unmarshal(value, &dc)
 			if err != nil {
 				return errors.Wrap(err, "unmarshal dockerconfig json failed")
@@ -60,6 +88,14 @@ func (mw *mutatingWebhook) mutateSecret(secret *corev1.Secret, vaultConfig Vault
 			err = mw.mutateDockerCreds(secret, &dc, vaultClient, vaultConfig)
 			if err != nil {
 				return errors.Wrap(err, "mutate dockerconfig json failed")
+			}
+		} else if hasInlineVaultDelimiters(string(value)) {
+			data := map[string]string{
+				key: string(value),
+			}
+			err := mw.mutateInlineSecretData(secret, data, vaultClient, vaultConfig)
+			if err != nil {
+				return err
 			}
 		} else if hasVaultPrefix(string(value)) {
 			sc := map[string]string{
@@ -75,14 +111,15 @@ func (mw *mutatingWebhook) mutateSecret(secret *corev1.Secret, vaultConfig Vault
 	return nil
 }
 
-func (mw *mutatingWebhook) mutateDockerCreds(secret *corev1.Secret, dc *registry.DockerCreds, vaultClient *vault.Client, vaultConfig VaultConfig) error {
-	assembled := registry.DockerCreds{Auths: map[string]dockerTypes.AuthConfig{}}
+func (mw *mutatingWebhook) mutateDockerCreds(secret *corev1.Secret, dc *dockerCreds, vaultClient *vault.Client, vaultConfig VaultConfig) error {
+	assembled := dockerCreds{Auths: map[string]dockerTypes.AuthConfig{}}
 
 	for key, creds := range dc.Auths {
 		authBytes, err := base64.StdEncoding.DecodeString(creds.Auth)
 		if err != nil {
 			return errors.Wrap(err, "auth base64 decoding failed")
 		}
+
 		auth := string(authBytes)
 		if hasVaultPrefix(auth) {
 			split := strings.Split(auth, ":")
@@ -120,6 +157,21 @@ func (mw *mutatingWebhook) mutateDockerCreds(secret *corev1.Secret, dc *registry
 
 	secret.Data[corev1.DockerConfigJsonKey] = marshalled
 
+	return nil
+}
+
+func (mw *mutatingWebhook) mutateInlineSecretData(secret *corev1.Secret, sc map[string]string, vaultClient *vault.Client, vaultConfig VaultConfig) error {
+	for key, value := range sc {
+		for _, vaultSecretReference := range findInlineVaultDelimiters(value) {
+			mapData, err := getDataFromVault(map[string]string{key: vaultSecretReference[1]}, vaultClient, vaultConfig, mw.logger)
+			if err != nil {
+				return err
+			}
+			for key, value := range mapData {
+				secret.Data[key] = []byte(strings.Replace(string(secret.Data[key]), vaultSecretReference[0], value, -1))
+			}
+		}
+	}
 	return nil
 }
 

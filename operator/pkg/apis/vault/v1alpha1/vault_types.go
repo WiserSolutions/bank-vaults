@@ -15,8 +15,6 @@
 package v1alpha1
 
 import (
-	"bytes"
-	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,9 +25,12 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/coreos/etcd-operator/pkg/util/etcdutil"
+	"github.com/imdario/mergo"
 	"github.com/spf13/cast"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
+	extv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/pointer"
@@ -42,7 +43,7 @@ var bankVaultsImage string
 
 func init() {
 	if bankVaultsImage = os.Getenv("BANK_VAULTS_IMAGE"); bankVaultsImage == "" {
-		bankVaultsImage = "banzaicloud/bank-vaults:latest"
+		bankVaultsImage = "ghcr.io/banzaicloud/bank-vaults:latest"
 	}
 }
 
@@ -69,47 +70,6 @@ type VaultList struct {
 	Items           []Vault `json:"items"`
 }
 
-func init() {
-	gob.Register(VaultConfig{})
-	gob.Register(VaultExternalConfig{})
-}
-
-type VaultConfig map[string]interface{}
-
-func (c VaultConfig) DeepCopy() VaultConfig {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	dec := gob.NewDecoder(&buf)
-	err := enc.Encode(c)
-	if err != nil {
-		panic(err)
-	}
-	var copy VaultConfig
-	err = dec.Decode(&copy)
-	if err != nil {
-		panic(err)
-	}
-	return copy
-}
-
-type VaultExternalConfig map[string]interface{}
-
-func (c VaultExternalConfig) DeepCopy() VaultExternalConfig {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	dec := gob.NewDecoder(&buf)
-	err := enc.Encode(c)
-	if err != nil {
-		panic(err)
-	}
-	var copy VaultExternalConfig
-	err = dec.Decode(&copy)
-	if err != nil {
-		panic(err)
-	}
-	return copy
-}
-
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // VaultSpec defines the desired state of Vault
@@ -118,15 +78,15 @@ type VaultSpec struct {
 
 	// Size defines the number of Vault instances in the cluster (>= 1 means HA)
 	// default: 1
-	Size int32 `json:"size"`
+	Size int32 `json:"size,omitempty"`
 
 	// Image specifies the Vault image to use for the Vault instances
 	// default: library/vault:latest
-	Image string `json:"image"`
+	Image string `json:"image,omitempty"`
 
 	// BankVaultsImage specifies the Bank Vaults image to use for Vault unsealing and configuration
 	// default: banzaicloud/bank-vaults:latest
-	BankVaultsImage string `json:"bankVaultsImage"`
+	BankVaultsImage string `json:"bankVaultsImage,omitempty"`
 
 	// BankVaultsVolumeMounts define some extra Kubernetes Volume mounts for the Bank Vaults Sidecar container.
 	// default:
@@ -134,95 +94,104 @@ type VaultSpec struct {
 
 	// StatsDDisabled specifies if StatsD based metrics should be disabled
 	// default: false
-	StatsDDisabled bool `json:"statsdDisabled"`
+	StatsDDisabled bool `json:"statsdDisabled,omitempty"`
 
 	// StatsDImage specifices the StatsD image to use for Vault metrics exportation
 	// default: prom/statsd-exporter:latest
-	StatsDImage string `json:"statsdImage"`
+	StatsDImage string `json:"statsdImage,omitempty"`
 
 	// FluentDEnabled specifies if FluentD based log exportation should be enabled
 	// default: false
-	FluentDEnabled bool `json:"fluentdEnabled"`
+	FluentDEnabled bool `json:"fluentdEnabled,omitempty"`
 
 	// FluentDImage specifices the FluentD image to use for Vault log exportation
-	// default: fluent/fluentd:stable
-	FluentDImage string `json:"fluentdImage"`
+	// default: fluent/fluentd:edge
+	FluentDImage string `json:"fluentdImage,omitempty"`
+
+	// FleuntDConfLocation is the location of the fluent.conf file
+	// default: "/fluentd/etc"
+	FleuntDConfLocation string `json:"fleuntdConfLocation,omitempty"`
 
 	// FluentDConfig specifices the FluentD configuration to use for Vault log exportation
 	// default:
-	FluentDConfig string `json:"fluentdConfig"`
+	FluentDConfig string `json:"fluentdConfig,omitempty"`
 
 	// WatchedSecretsLabels specifices a set of Kubernetes label selectors which select Secrets to watch.
 	// If these Secrets change the Vault cluster gets restarted. For example a Secret that Cert-Manager is
 	// managing a public Certificate for Vault using let's Encrypt.
 	// default:
-	WatchedSecretsLabels []map[string]string `json:"watchedSecretsLabels"`
+	WatchedSecretsLabels []map[string]string `json:"watchedSecretsLabels,omitempty"`
 
 	// WatchedSecretsAnnotations specifices a set of Kubernetes annotations selectors which select Secrets to watch.
 	// If these Secrets change the Vault cluster gets restarted. For example a Secret that Cert-Manager is
 	// managing a public Certificate for Vault using let's Encrypt.
 	// default:
-	WatchedSecretsAnnotations []map[string]string `json:"watchedSecretsAnnotations"`
+	WatchedSecretsAnnotations []map[string]string `json:"watchedSecretsAnnotations,omitempty"`
 
 	// Annotations define a set of common Kubernetes annotations that will be added to all operator managed resources.
 	// default:
-	Annotations map[string]string `json:"annotations"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 
 	// VaultAnnotations define a set of Kubernetes annotations that will be added to all Vault Pods.
 	// default:
-	VaultAnnotations map[string]string `json:"vaultAnnotations"`
+	VaultAnnotations map[string]string `json:"vaultAnnotations,omitempty"`
 
 	// VaultLabels define a set of Kubernetes labels that will be added to all Vault Pods.
 	// default:
-	VaultLabels map[string]string `json:"vaultLabels"`
+	VaultLabels map[string]string `json:"vaultLabels,omitempty"`
 
 	// VaultPodSpec is a Kubernetes Pod specification snippet (`spec:` block) that will be merged into the operator generated
 	// Vault Pod specification.
 	// default:
-	VaultPodSpec v1.PodSpec `json:"vaultPodSpec"`
+	VaultPodSpec *EmbeddedPodSpec `json:"vaultPodSpec,omitempty"`
+
+	// VaultContainerSpec is a Kubernetes Container specification snippet that will be merged into the operator generated
+	// Vault Container specification.
+	// default:
+	VaultContainerSpec v1.Container `json:"vaultContainerSpec,omitempty"`
 
 	// VaultConfigurerAnnotations define a set of Kubernetes annotations that will be added to the Vault Configurer Pod.
 	// default:
-	VaultConfigurerAnnotations map[string]string `json:"vaultConfigurerAnnotations"`
+	VaultConfigurerAnnotations map[string]string `json:"vaultConfigurerAnnotations,omitempty"`
 
 	// VaultConfigurerLabels define a set of Kubernetes labels that will be added to all Vault Configurer Pod.
 	// default:
-	VaultConfigurerLabels map[string]string `json:"vaultConfigurerLabels"`
+	VaultConfigurerLabels map[string]string `json:"vaultConfigurerLabels,omitempty"`
 
 	// VaultConfigurerPodSpec is a Kubernetes Pod specification snippet (`spec:` block) that will be merged into
 	// the operator generated Vault Configurer Pod specification.
 	// default:
-	VaultConfigurerPodSpec v1.PodSpec `json:"vaultConfigurerPodSpec"`
+	VaultConfigurerPodSpec *EmbeddedPodSpec `json:"vaultConfigurerPodSpec,omitempty"`
 
 	// Config is the Vault Server configuration. See https://www.vaultproject.io/docs/configuration/ for more details.
 	// default:
-	Config VaultConfig `json:"config"`
+	Config extv1beta1.JSON `json:"config"`
 
 	// ExternalConfig is higher level configuration block which instructs the Bank Vaults Configurer to configure Vault
 	// through its API, thus allows setting up:
 	// - Secret Engines
 	// - Auth Methods
-	// - Autid Devices
+	// - Audit Devices
 	// - Plugin Backends
 	// - Policies
 	// - Startup Secrets (Bank Vaults feature)
 	// A documented example: https://github.com/banzaicloud/bank-vaults/blob/master/vault-config.yml
 	// default:
-	ExternalConfig VaultExternalConfig `json:"externalConfig"`
+	ExternalConfig extv1beta1.JSON `json:"externalConfig,omitempty"`
 
 	// UnsealConfig defines where the Vault cluster's unseal keys and root token should be stored after initialization.
 	// See the type's documentation for more details. Only one method may be specified.
 	// default: Kubernetes Secret based unsealing
-	UnsealConfig UnsealConfig `json:"unsealConfig"`
+	UnsealConfig UnsealConfig `json:"unsealConfig,omitempty"`
 
 	// CredentialsConfig defines a external Secret for Vault and how it should be mounted to the Vault Pod
 	// for example accessing Cloud resources.
 	// default:
-	CredentialsConfig CredentialsConfig `json:"credentialsConfig"`
+	CredentialsConfig CredentialsConfig `json:"credentialsConfig,omitempty"`
 
 	// EnvsConfig is a list of Kubernetes environment variable definitions that will be passed to all Bank-Vaults pods.
 	// default:
-	EnvsConfig []v1.EnvVar `json:"envsConfig"`
+	EnvsConfig []v1.EnvVar `json:"envsConfig,omitempty"`
 
 	// SecurityContext is a Kubernetes PodSecurityContext that will be applied to all Pods created by the operator.
 	// default:
@@ -230,13 +199,13 @@ type VaultSpec struct {
 
 	// EtcdVersion is the ETCD version of the automatically provisioned ETCD cluster
 	// default: "3.3.17"
-	EtcdVersion string `json:"etcdVersion"`
+	EtcdVersion string `json:"etcdVersion,omitempty"`
 
 	// EtcdSize is the size of the automatically provisioned ETCD cluster, -1 will disable automatic cluster provisioning.
 	// The cluster is only provisioned if it is detected from the Vault configuration that it would like to use
 	// ETCD as the storage backend. If not odd it will be changed always to the next (< etcdSize) odd number.
 	// default: 3
-	EtcdSize int `json:"etcdSize"`
+	EtcdSize int `json:"etcdSize,omitempty"`
 
 	// EtcdRepository is the repository used to pull the etcd imaegs
 	// default:
@@ -264,40 +233,56 @@ type VaultSpec struct {
 	// default:
 	EtcdAffinity *v1.Affinity `json:"etcdAffinity,omitempty"`
 
-	// ServiceType is a Kuberrnetes Service type of the Vault Service.
+	// ServiceType is a Kubernetes Service type of the Vault Service.
 	// default: ClusterIP
-	ServiceType string `json:"serviceType"`
+	ServiceType string `json:"serviceType,omitempty"`
+
+	// LoadBalancerIP is an optional setting for allocating a specific address for the entry service object
+	// of type LoadBalancer
+	// default: ""
+	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
+
+	// serviceRegistrationEnabled enables the injection of the service_registration Vault stanza.
+	// This requires elaborated RBAC privileges for updating Pod labels for the Vault Pod.
+	// default: false
+	ServiceRegistrationEnabled bool `json:"serviceRegistrationEnabled,omitempty"`
 
 	// RaftLeaderAddress defines the leader address of the raft cluster in multi-cluster deployments.
 	// (In single cluster (namespace) deployments it is automatically detected).
 	// "self" is a special value which means that this instance should be the bootstrap leader instance.
 	// default: ""
-	RaftLeaderAddress string `json:"raftLeaderAddress"`
+	RaftLeaderAddress string `json:"raftLeaderAddress,omitempty"`
 
 	// ServicePorts is an extra map of ports that should be exposed by the Vault Service.
 	// default:
-	ServicePorts map[string]int32 `json:"servicePorts"`
+	ServicePorts map[string]int32 `json:"servicePorts,omitempty"`
+
+	// Affinity is a group of affinity scheduling rules applied to all Vault Pods.
+	// default:
+	Affinity *v1.Affinity `json:"affinity,omitempty"`
 
 	// PodAntiAffinity is the TopologyKey in the Vault Pod's PodAntiAffinity.
 	// No PodAntiAffinity is used if empty.
+	// Deprecated. Use Affinity.
 	// default:
-	PodAntiAffinity string `json:"podAntiAffinity"`
+	PodAntiAffinity string `json:"podAntiAffinity,omitempty"`
 
 	// NodeAffinity is Kubernetees NodeAffinity definition that should be applied to all Vault Pods.
+	// Deprecated. Use Affinity.
 	// default:
-	NodeAffinity v1.NodeAffinity `json:"nodeAffinity"`
+	NodeAffinity v1.NodeAffinity `json:"nodeAffinity,omitempty"`
 
 	// NodeSelector is Kubernetees NodeSelector definition that should be applied to all Vault Pods.
 	// default:
-	NodeSelector map[string]string `json:"nodeSelector"`
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// Tolerations is Kubernetes Tolerations definition that should be applied to all Vault Pods.
 	// default:
-	Tolerations []v1.Toleration `json:"tolerations"`
+	Tolerations []v1.Toleration `json:"tolerations,omitempty"`
 
 	// ServiceAccount is Kubernetes ServiceAccount in which the Vault Pods should be running in.
 	// default: default
-	ServiceAccount string `json:"serviceAccount"`
+	ServiceAccount string `json:"serviceAccount,omitempty"`
 
 	// Volumes define some extra Kubernetes Volumes for the Vault Pods.
 	// default:
@@ -309,15 +294,15 @@ type VaultSpec struct {
 
 	// VolumeClaimTemplates define some extra Kubernetes PersistentVolumeClaim templates for the Vault Statefulset.
 	// default:
-	VolumeClaimTemplates []v1.PersistentVolumeClaim `json:"volumeClaimTemplates,omitempty"`
+	VolumeClaimTemplates []EmbeddedPersistentVolumeClaim `json:"volumeClaimTemplates,omitempty"`
 
 	// VaultEnvsConfig is a list of Kubernetes environment variable definitions that will be passed to the Vault container.
 	// default:
-	VaultEnvsConfig []v1.EnvVar `json:"vaultEnvsConfig"`
+	VaultEnvsConfig []v1.EnvVar `json:"vaultEnvsConfig,omitempty"`
 
 	// SidecarEnvsConfig is a list of Kubernetes environment variable definitions that will be passed to Vault sidecar containers.
 	// default:
-	SidecarEnvsConfig []v1.EnvVar `json:"sidecarEnvsConfig"`
+	SidecarEnvsConfig []v1.EnvVar `json:"sidecarEnvsConfig,omitempty"`
 
 	// Resources defines the resource limits for all the resources created by the operator.
 	// See the type for more details.
@@ -363,7 +348,7 @@ type VaultSpec struct {
 
 	// VeleroFsfreezeImage specifices the Velero Fsrfeeze image to use in Velero backup hooks
 	// default: velero/fsfreeze-pause:latest
-	VeleroFsfreezeImage string `json:"veleroFsfreezeImage"`
+	VeleroFsfreezeImage string `json:"veleroFsfreezeImage,omitempty"`
 
 	// InitContainers add extra initContainers
 	VaultInitContainers []v1.Container `json:"vaultInitContainers,omitempty"`
@@ -414,7 +399,8 @@ func (spec *VaultSpec) GetStorage() map[string]interface{} {
 }
 
 func (spec *VaultSpec) getStorage() map[string]interface{} {
-	return cast.ToStringMap(spec.Config["storage"])
+	config := spec.GetVaultConfig()
+	return cast.ToStringMap(config["storage"])
 }
 
 // GetHAStorage returns Vault's ha_storage stanza
@@ -424,7 +410,16 @@ func (spec *VaultSpec) GetHAStorage() map[string]interface{} {
 }
 
 func (spec *VaultSpec) getHAStorage() map[string]interface{} {
-	return cast.ToStringMap(spec.Config["ha_storage"])
+	config := spec.GetVaultConfig()
+	return cast.ToStringMap(config["ha_storage"])
+}
+
+func (spec *VaultSpec) GetVaultConfig() map[string]interface{} {
+	var config map[string]interface{}
+	// This config JSON is already validated,
+	// so we can skip wiring through the error everywhere.
+	_ = json.Unmarshal(spec.Config.Raw, &config)
+	return config
 }
 
 // GetEtcdStorage returns the etcd storage if configured or nil
@@ -447,6 +442,9 @@ func (spec *VaultSpec) GetStorageType() string {
 // GetHAStorageType returns the type of Vault's ha_storage stanza
 func (spec *VaultSpec) GetHAStorageType() string {
 	haStorage := spec.getHAStorage()
+	if len(haStorage) == 0 {
+		return ""
+	}
 	return reflect.ValueOf(haStorage).MapKeys()[0].String()
 }
 
@@ -506,8 +504,16 @@ func (spec *VaultSpec) HasStorageHAEnabled() bool {
 // IsTLSDisabled returns if Vault's TLS should be disabled
 func (spec *VaultSpec) IsTLSDisabled() bool {
 	listener := spec.getListener()
-	tcpSpecs := cast.ToStringMap(listener["tcp"])
-	return cast.ToBool(tcpSpecs["tls_disable"])
+	tcp := cast.ToStringMap(listener["tcp"])
+	return cast.ToBool(tcp["tls_disable"])
+}
+
+// IsTelemetryUnauthenticated returns if Vault's telemetry endpoint can be accessed publicly
+func (spec *VaultSpec) IsTelemetryUnauthenticated() bool {
+	listener := spec.getListener()
+	tcp := cast.ToStringMap(listener["tcp"])
+	telemetry := cast.ToStringMap(tcp["telemetry"])
+	return cast.ToBool(telemetry["unauthenticated_metrics_access"])
 }
 
 // GetAPIScheme returns if Vault's API address should be called on http or https
@@ -532,7 +538,8 @@ func (spec *VaultSpec) GetTLSExpiryThreshold() time.Duration {
 }
 
 func (spec *VaultSpec) getListener() map[string]interface{} {
-	return cast.ToStringMap(spec.Config["listener"])
+	config := spec.GetVaultConfig()
+	return cast.ToStringMap(config["listener"])
 }
 
 // GetVaultImage returns the Vault image to use
@@ -571,8 +578,14 @@ func (spec *VaultSpec) GetVeleroFsfreezeImage() string {
 func (spec *VaultSpec) GetVolumeClaimTemplates() []v1.PersistentVolumeClaim {
 	var pvcs []v1.PersistentVolumeClaim
 	for _, pvc := range spec.VolumeClaimTemplates {
-		pvc.Status.Phase = v1.ClaimPending
-		pvcs = append(pvcs, pvc)
+		pvcs = append(pvcs, v1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        pvc.Name,
+				Labels:      pvc.Labels,
+				Annotations: pvc.Annotations,
+			},
+			Spec: pvc.Spec,
+		})
 	}
 	return pvcs
 }
@@ -660,6 +673,14 @@ func (spec *VaultSpec) GetFluentDImage() string {
 	return spec.FluentDImage
 }
 
+// GetFluentDConfMountPath returns the mount path for the fluent.conf
+func (spec *VaultSpec) GetFluentDConfMountPath() string {
+	if spec.FleuntDConfLocation == "" {
+		return "/fluentd/etc"
+	}
+	return spec.FleuntDConfLocation
+}
+
 // IsFluentDEnabled returns true if fluentd sidecar is to be deployed
 func (spec *VaultSpec) IsFluentDEnabled() bool {
 	return spec.FluentDEnabled
@@ -671,26 +692,77 @@ func (spec *VaultSpec) IsStatsDDisabled() bool {
 }
 
 // ConfigJSON returns the Config field as a JSON string
-func (spec *VaultSpec) ConfigJSON() string {
-	config, _ := json.Marshal(spec.Config)
-	return string(config)
+func (v *Vault) ConfigJSON() (string, error) {
+	config := map[string]interface{}{}
+
+	err := json.Unmarshal(v.Spec.Config.Raw, &config)
+	if err != nil {
+		return "", err
+	}
+
+	if v.Spec.ServiceRegistrationEnabled && v.Spec.HasHAStorage() {
+		serviceRegistration := map[string]interface{}{
+			"service_registration": map[string]interface{}{
+				"kubernetes": map[string]string{
+					"namespace": v.Namespace,
+				},
+			},
+		}
+
+		if err := mergo.Merge(&config, serviceRegistration); err != nil {
+			return "", err
+		}
+	}
+
+	// Overwrite Vault config with the generated TLS certificate's settings
+	if v.Spec.HasEtcdStorage() && v.Spec.GetEtcdSize() > 0 {
+		storageKey := "storage"
+		if v.Spec.hasHAStorageStanza() && v.Spec.GetHAStorageType() == "etcd" {
+			storageKey = "ha_storage"
+		}
+		etcdStorage := map[string]interface{}{
+			storageKey: map[string]interface{}{
+				"etcd": map[string]interface{}{
+					"tls_ca_file":   "/etcd/tls/" + etcdutil.CliCAFile,
+					"tls_cert_file": "/etcd/tls/" + etcdutil.CliCertFile,
+					"tls_key_file":  "/etcd/tls/" + etcdutil.CliKeyFile,
+				},
+			},
+		}
+
+		if err := mergo.Merge(&config, etcdStorage); err != nil {
+			return "", err
+		}
+	}
+
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+
+	return string(configJSON), nil
 }
 
 // ExternalConfigJSON returns the ExternalConfig field as a JSON string
 func (spec *VaultSpec) ExternalConfigJSON() string {
-	config, _ := json.Marshal(spec.ExternalConfig)
-	return string(config)
+	return string(spec.ExternalConfig.Raw)
 }
 
 // IsAutoUnseal checks if auto-unseal is configured
 func (spec *VaultSpec) IsAutoUnseal() bool {
-	_, ok := spec.Config["seal"]
+	config := spec.GetVaultConfig()
+	_, ok := config["seal"]
 	return ok
 }
 
 // IsRaftStorage checks if raft storage is configured
 func (spec *VaultSpec) IsRaftStorage() bool {
 	return spec.GetStorageType() == "raft"
+}
+
+// IsRaftHAStorage checks if raft ha_storage is configured
+func (spec *VaultSpec) IsRaftHAStorage() bool {
+	return spec.GetStorageType() != "raft" && spec.GetHAStorageType() == "raft"
 }
 
 // IsRaftBootstrapFollower checks if this cluster should be considered the bootstrap follower.
@@ -973,8 +1045,8 @@ func (usc *UnsealConfig) HSMDaemonNeeded() bool {
 
 // KubernetesUnsealConfig holds the parameters for Kubernetes based unsealing
 type KubernetesUnsealConfig struct {
-	SecretNamespace string `json:"secretNamespace"`
-	SecretName      string `json:"secretName"`
+	SecretNamespace string `json:"secretNamespace,omitempty"`
+	SecretName      string `json:"secretName,omitempty"`
 }
 
 // GoogleUnsealConfig holds the parameters for Google KMS based unsealing
@@ -1008,25 +1080,25 @@ type AWSUnsealConfig struct {
 	S3Bucket  string `json:"s3Bucket"`
 	S3Prefix  string `json:"s3Prefix"`
 	S3Region  string `json:"s3Region"`
-	S3SSE     string `json:"s3SSE"`
+	S3SSE     string `json:"s3SSE,omitempty"`
 }
 
 // VaultUnsealConfig holds the parameters for remote Vault based unsealing
 type VaultUnsealConfig struct {
 	Address        string `json:"address"`
 	UnsealKeysPath string `json:"unsealKeysPath"`
-	Role           string `json:"role"`
-	AuthPath       string `json:"authPath"`
-	TokenPath      string `json:"tokenPath"`
-	Token          string `json:"token"`
+	Role           string `json:"role,omitempty"`
+	AuthPath       string `json:"authPath,omitempty"`
+	TokenPath      string `json:"tokenPath,omitempty"`
+	Token          string `json:"token,omitempty"`
 }
 
 // HSMUnsealConfig holds the parameters for remote HSM based unsealing
 type HSMUnsealConfig struct {
-	Daemon     bool   `json:"daemon"`
+	Daemon     bool   `json:"daemon,omitempty"`
 	ModulePath string `json:"modulePath"`
-	SlotID     uint   `json:"slotId"`
-	TokenLabel string `json:"tokenLabel"`
+	SlotID     uint   `json:"slotId,omitempty"`
+	TokenLabel string `json:"tokenLabel,omitempty"`
 	Pin        string `json:"pin"`
 	KeyLabel   string `json:"keyLabel"`
 }
@@ -1045,6 +1117,7 @@ type Resources struct {
 	HSMDaemon          *v1.ResourceRequirements `json:"hsmDaemon,omitempty"`
 	Etcd               *v1.ResourceRequirements `json:"etcd,omitempty"`
 	PrometheusExporter *v1.ResourceRequirements `json:"prometheusExporter,omitempty"`
+	FluentD            *v1.ResourceRequirements `json:"fluentd,omitempty"`
 }
 
 // Ingress specification for the Vault cluster
