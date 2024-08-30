@@ -67,7 +67,7 @@ spec:
               value: "debug"
             {{- end }}
             - name: VAULT_ENV_IMAGE
-              value: "{{ .Values.vaultEnv.repository }}:{{ .Values.vaultEnv.image.tag }}"
+              value: "{{ .Values.vaultEnv.repository }}:{{ .Values.vaultEnv.tag }}"
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
