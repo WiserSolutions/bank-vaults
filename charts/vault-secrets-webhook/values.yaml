@@ -7,9 +7,9 @@ replicaCount: 2
 debug: false
 
 certificate:
-  useCertManager: false
+  useCertManager: true
   servingCertificate: null
-  generate: true
+  generate: false
   server:
     tls:
       crt: 
